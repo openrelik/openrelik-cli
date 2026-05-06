@@ -1,0 +1,43 @@
+version: 2
+
+project_name: openrelik
+
+builds:
+  - main: .
+    binary: openrelik
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/openrelik/openrelik-cli/cli.Version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+homebrew_casks:
+  - name: openrelik-cli
+    repository:
+      owner: openrelik
+      name: homebrew-openrelik-cli
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    homepage: "https://github.com/openrelik/openrelik-cli"
+    description: "A command line tool to interact with the OpenRelik API"
+    license: "Apache-2.0"
+    binaries: [openrelik]
+    hooks:
+      post:
+        install: |
+          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/openrelik"]

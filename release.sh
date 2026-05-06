@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUMP="${1:-minor}"  # minor | patch
+BUMP="${1:-patch}"  # minor | patch
 
 LATEST=$(gh release view --json tagName --jq '.tagName' 2>/dev/null || echo "v0.2.6")
 LATEST="${LATEST#v}"

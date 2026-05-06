@@ -6,7 +6,6 @@ import (
 	"strconv"
 
 	"github.com/openrelik/openrelik-cli/util"
-	"github.com/openrelik/openrelik-cli/view"
 	"github.com/spf13/cobra"
 )
 
@@ -80,10 +79,10 @@ immediately after creation.`,
 				if err != nil {
 					return err
 				}
-				return formatAndPrint(cmd, &view.WorkflowStartedView{Workflow: workflow})
+				return formatAndPrint(cmd, &WorkflowStartedView{Workflow: workflow})
 			}
 
-			return formatAndPrint(cmd, &view.WorkflowCreatedView{Workflow: workflow})
+			return formatAndPrint(cmd, &WorkflowCreatedView{Workflow: workflow})
 		},
 	}
 
@@ -127,7 +126,7 @@ WORKFLOW_ID is the integer ID of the workflow.`,
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.WorkflowInfoView{Workflow: workflow})
+			return formatAndPrint(cmd, &WorkflowInfoView{Workflow: workflow})
 		},
 	}
 }
@@ -180,7 +179,7 @@ WORKFLOW_ID is the integer ID of the workflow.`,
 				}
 			}
 
-			return formatAndPrint(cmd, &view.WorkflowStatusView{WorkflowStatus: status})
+			return formatAndPrint(cmd, &WorkflowStatusView{WorkflowStatus: status})
 		},
 	}
 }
@@ -231,7 +230,7 @@ monitor progress after starting.`,
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.WorkflowStartedView{Workflow: updatedWorkflow})
+			return formatAndPrint(cmd, &WorkflowStartedView{Workflow: updatedWorkflow})
 		},
 	}
 

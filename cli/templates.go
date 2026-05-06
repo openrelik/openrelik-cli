@@ -2,7 +2,6 @@ package cli
 
 import (
 	"github.com/openrelik/openrelik-cli/util"
-	"github.com/openrelik/openrelik-cli/view"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +38,7 @@ func newTemplateListCmd() *cobra.Command {
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.TemplateListView{Templates: templates})
+			return formatAndPrint(cmd, &TemplateListView{Templates: templates})
 		},
 	}
 }

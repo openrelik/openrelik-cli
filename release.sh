@@ -3,7 +3,7 @@ set -euo pipefail
 
 BUMP="${1:-minor}"  # minor | patch
 
-LATEST=$(gh release view --json tagName --jq '.tagName' 2>/dev/null || echo "v0.0.0")
+LATEST=$(gh release view --json tagName --jq '.tagName' 2>/dev/null || echo "v0.2.6")
 LATEST="${LATEST#v}"
 IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
 

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"github.com/openrelik/openrelik-cli/util"
-	"github.com/openrelik/openrelik-cli/view"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +38,7 @@ func newMeCmd() *cobra.Command {
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.UserMeView{User: user})
+			return formatAndPrint(cmd, &UserMeView{User: user})
 		},
 	}
 }

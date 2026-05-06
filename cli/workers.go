@@ -17,7 +17,6 @@ package cli
 import (
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
-	"github.com/openrelik/openrelik-cli/view"
 	"github.com/spf13/cobra"
 )
 
@@ -61,7 +60,7 @@ This command also refreshes the local worker cache used to generate
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.WorkerListView{Workers: workers})
+			return formatAndPrint(cmd, &WorkerListView{Workers: workers})
 		},
 	}
 

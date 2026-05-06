@@ -10,7 +10,6 @@ import (
 
 	openrelik "github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/util"
-	"github.com/openrelik/openrelik-cli/view"
 	"github.com/spf13/cobra"
 )
 
@@ -76,7 +75,7 @@ by a previous 'folder list' call.`,
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.FolderListView{Folders: folders})
+			return formatAndPrint(cmd, &FolderListView{Folders: folders})
 		},
 	}
 }
@@ -113,7 +112,7 @@ subfolder inside the specified parent folder.`,
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.FolderCreatedView{Folder: folder})
+			return formatAndPrint(cmd, &FolderCreatedView{Folder: folder})
 		},
 	}
 

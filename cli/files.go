@@ -10,7 +10,6 @@ import (
 
 	"github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/util"
-	"github.com/openrelik/openrelik-cli/view"
 	"github.com/spf13/cobra"
 )
 
@@ -61,7 +60,7 @@ FOLDER_ID is the integer ID of the folder, as shown by 'folder list'.`,
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.FileListView{Files: files})
+			return formatAndPrint(cmd, &FileListView{Files: files})
 		},
 	}
 }
@@ -96,7 +95,7 @@ ID is the integer file ID, as shown by 'file list'.`,
 				return err
 			}
 
-			return formatAndPrint(cmd, &view.FileInfoView{File: file})
+			return formatAndPrint(cmd, &FileInfoView{File: file})
 		},
 	}
 }
@@ -297,9 +296,9 @@ file path and a folder ID are required.`,
 			}
 
 			if len(results) == 1 {
-				return formatAndPrint(cmd, &view.FileUploadedView{File: results[0], FolderID: fID})
+				return formatAndPrint(cmd, &FileUploadedView{File: results[0], FolderID: fID})
 			}
-			return formatAndPrint(cmd, &view.FileUploadedMultiView{Files: results, FolderID: fID})
+			return formatAndPrint(cmd, &FileUploadedMultiView{Files: results, FolderID: fID})
 		},
 	}
 

@@ -25,7 +25,6 @@ import (
 	"github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
-	"github.com/openrelik/openrelik-cli/view"
 	"github.com/spf13/cobra"
 )
 
@@ -236,7 +235,7 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			}
 
 			if outputFormat != "human" && fullWorkflow != nil {
-				return formatAndPrint(cmd, &view.WorkflowInfoView{Workflow: fullWorkflow})
+				return formatAndPrint(cmd, &WorkflowInfoView{Workflow: fullWorkflow})
 			}
 
 			monitor.PrintSummary(startTime, totalUploaded, totalDownloaded)

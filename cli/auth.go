@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -74,6 +76,9 @@ stored credentials.`,
 
 			settings, err := config.LoadSettings()
 			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("error loading settings: %w", err)
+				}
 				// If settings don't exist, create the first one
 				settings = &config.Settings{
 					ActiveServer: server,
@@ -99,6 +104,9 @@ stored credentials.`,
 
 			creds, err := config.LoadCredentials()
 			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("error loading credentials: %w", err)
+				}
 				creds = &config.Credentials{APIKeys: make(map[string]string)}
 			}
 			if creds.APIKeys == nil {
@@ -144,7 +152,11 @@ func newAuthSwitchCmd() *cobra.Command {
 			var choice int
 			if scanner.Scan() {
 				choiceStr := strings.TrimSpace(scanner.Text())
-				choice, _ = strconv.Atoi(choiceStr)
+				var err error
+				choice, err = strconv.Atoi(choiceStr)
+				if err != nil {
+					return fmt.Errorf("invalid input: %q is not a number", choiceStr)
+				}
 			}
 
 			if choice < 1 || choice > len(settings.Servers) {

@@ -21,7 +21,10 @@ func TestConfig(t *testing.T) {
 	defer func() { baseDir = originalBaseDir }()
 
 	t.Run("SaveAndLoadSettings", func(t *testing.T) {
-		s := &Settings{ServerURL: "http://test-server"}
+		s := &Settings{
+			ActiveServer: "http://test-server",
+			Servers:      []ServerConfig{{URL: "http://test-server"}},
+		}
 		if err := SaveSettings(s); err != nil {
 			t.Fatalf("SaveSettings failed: %v", err)
 		}
@@ -31,8 +34,12 @@ func TestConfig(t *testing.T) {
 			t.Fatalf("LoadSettings failed: %v", err)
 		}
 
-		if loaded.ServerURL != s.ServerURL {
-			t.Errorf("expected ServerURL %q, got %q", s.ServerURL, loaded.ServerURL)
+		if loaded.ActiveServer != s.ActiveServer {
+			t.Errorf("expected ActiveServer %q, got %q", s.ActiveServer, loaded.ActiveServer)
+		}
+
+		if len(loaded.Servers) != 1 || loaded.Servers[0].URL != "http://test-server" {
+			t.Errorf("unexpected servers list: %+v", loaded.Servers)
 		}
 
 		// Verify directory and file permissions
@@ -55,7 +62,9 @@ func TestConfig(t *testing.T) {
 	})
 
 	t.Run("SaveAndLoadCredentials", func(t *testing.T) {
-		c := &Credentials{APIKey: "test-api-key"}
+		c := &Credentials{
+			APIKeys: map[string]string{"http://test-server": "test-api-key"},
+		}
 		if err := SaveCredentials(c); err != nil {
 			t.Fatalf("SaveCredentials failed: %v", err)
 		}
@@ -65,8 +74,8 @@ func TestConfig(t *testing.T) {
 			t.Fatalf("LoadCredentials failed: %v", err)
 		}
 
-		if loaded.APIKey != c.APIKey {
-			t.Errorf("expected APIKey %q, got %q", c.APIKey, loaded.APIKey)
+		if loaded.APIKeys["http://test-server"] != "test-api-key" {
+			t.Errorf("expected APIKey %q, got %q", "test-api-key", loaded.APIKeys["http://test-server"])
 		}
 	})
 
@@ -74,7 +83,7 @@ func TestConfig(t *testing.T) {
 		// Clean up files
 		dir, _ := GetConfigDir()
 		os.Remove(filepath.Join(dir, settingsFile))
-		os.Remove(filepath.Join(dir, authCredsFile))
+		os.Remove(filepath.Join(dir, credentialsFile))
 
 		_, err := LoadSettings()
 		if err == nil {
@@ -97,7 +106,7 @@ func TestConfig(t *testing.T) {
 			t.Error("expected error loading invalid settings, got nil")
 		}
 
-		os.WriteFile(filepath.Join(dir, authCredsFile), []byte("invalid json"), filePerm)
+		os.WriteFile(filepath.Join(dir, credentialsFile), []byte("invalid json"), filePerm)
 		_, err = LoadCredentials()
 		if err == nil {
 			t.Error("expected error loading invalid credentials, got nil")
@@ -135,7 +144,7 @@ func TestConfig(t *testing.T) {
 	})
 
 	t.Run("CredentialsMasking", func(t *testing.T) {
-		c := Credentials{APIKey: "secret-key"}
+		c := Credentials{APIKeys: map[string]string{"test": "secret-key"}}
 		str := c.String()
 		if str != "********" {
 			t.Errorf("expected masked credentials, got %q", str)
@@ -218,12 +227,12 @@ func TestConfig(t *testing.T) {
 		os.Chmod(dir, 0400)
 		defer os.Chmod(dir, 0700)
 
-		err := SaveSettings(&Settings{ServerURL: "test"})
+		err := SaveSettings(&Settings{ActiveServer: "test", Servers: []ServerConfig{{URL: "test"}}})
 		if err == nil {
 			t.Error("expected error writing to read-only dir, got nil")
 		}
 
-		err = SaveCredentials(&Credentials{APIKey: "test"})
+		err = SaveCredentials(&Credentials{APIKeys: map[string]string{"http://test-server": "test"}})
 		if err == nil {
 			t.Error("expected error writing to read-only dir, got nil")
 		}

@@ -15,7 +15,7 @@ import (
 const (
 	configDir        = ".openrelik"
 	settingsFile     = "settings.json"
-	authCredsFile    = "auth_creds.json"
+	credentialsFile  = "credentials.json"
 	workersCacheFile = "workers_cache.json"
 	dirPerm          = 0700
 	filePerm         = 0600
@@ -34,16 +34,45 @@ type workersCacheEntry struct {
 	SavedAt time.Time          `json:"saved_at"`
 }
 
+type ServerConfig struct {
+	URL string `json:"url"`
+}
+
 type Settings struct {
-	ServerURL string `json:"server_url"`
+	ActiveServer string         `json:"active_server"`
+	Servers      []ServerConfig `json:"servers"`
+
+	// Deprecated: Use Servers and ActiveServer
+	ServerURL string `json:"server_url,omitempty"`
 }
 
 type Credentials struct {
-	APIKey string `json:"api_key"`
+	APIKeys map[string]string `json:"api_keys"` // URL -> APIKey
 }
 
 func (c Credentials) String() string {
 	return "********"
+}
+
+func (s *Settings) GetActiveServer() *ServerConfig {
+	for i := range s.Servers {
+		if s.Servers[i].URL == s.ActiveServer {
+			return &s.Servers[i]
+		}
+	}
+	if len(s.Servers) > 0 {
+		return &s.Servers[0]
+	}
+	return nil
+}
+
+func (s *Settings) GetServerByURL(url string) *ServerConfig {
+	for i := range s.Servers {
+		if s.Servers[i].URL == url {
+			return &s.Servers[i]
+		}
+	}
+	return nil
 }
 
 var baseDir string
@@ -90,6 +119,14 @@ func LoadSettings() (*Settings, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal settings file %s: %w", path, err)
 	}
+
+	// Migration for old settings format
+	if s.ServerURL != "" && len(s.Servers) == 0 {
+		s.Servers = []ServerConfig{{URL: s.ServerURL}}
+		s.ActiveServer = s.ServerURL
+		s.ServerURL = ""
+	}
+
 	return &s, nil
 }
 
@@ -111,7 +148,7 @@ func LoadCredentials() (*Credentials, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, authCredsFile)
+	path := filepath.Join(dir, credentialsFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read credentials file %s: %w", path, err)
@@ -120,8 +157,14 @@ func LoadCredentials() (*Credentials, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal credentials file %s: %w", path, err)
 	}
+
+	if c.APIKeys == nil {
+		c.APIKeys = make(map[string]string)
+	}
+
 	return &c, nil
 }
+
 
 func SaveCredentials(c *Credentials) error {
 	dir, err := EnsureConfigDir()
@@ -132,7 +175,7 @@ func SaveCredentials(c *Credentials) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
-	path := filepath.Join(dir, authCredsFile)
+	path := filepath.Join(dir, credentialsFile)
 	return saveAtomic(path, data)
 }
 

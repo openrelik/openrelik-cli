@@ -55,9 +55,12 @@ var NewAPIClient = func() (*openrelik.Client, error) {
 	if s == "" {
 		s = os.Getenv("OPENRELIK_SERVER_URL")
 	}
+	var settings *config.Settings
 	if s == "" {
-		if settings, err := config.LoadSettings(); err == nil {
-			s = settings.ServerURL
+		if settings, _ = config.LoadSettings(); settings != nil {
+			if active := settings.GetActiveServer(); active != nil {
+				s = active.URL
+			}
 		}
 	}
 
@@ -66,8 +69,10 @@ var NewAPIClient = func() (*openrelik.Client, error) {
 		k = os.Getenv("OPENRELIK_API_KEY")
 	}
 	if k == "" {
-		if creds, err := config.LoadCredentials(); err == nil {
-			k = creds.APIKey
+		if creds, _ := config.LoadCredentials(); creds != nil && s != "" {
+			if val, ok := creds.APIKeys[s]; ok {
+				k = val
+			}
 		}
 	}
 
@@ -80,6 +85,7 @@ var NewAPIClient = func() (*openrelik.Client, error) {
 
 	return openrelik.NewClient(s, k)
 }
+
 
 func newClient() (*openrelik.Client, error) { return NewAPIClient() }
 

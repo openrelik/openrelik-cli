@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -24,6 +25,9 @@ func newAuthCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newLoginCmd())
+	cmd.AddCommand(newAuthSwitchCmd())
+	cmd.AddCommand(newAuthStatusCmd())
+	cmd.AddCommand(newAuthListCmd())
 	return cmd
 }
 
@@ -68,12 +72,41 @@ stored credentials.`,
 				return fmt.Errorf("API key is required")
 			}
 
-			err = config.SaveSettings(&config.Settings{ServerURL: server})
+			settings, err := config.LoadSettings()
+			if err != nil {
+				// If settings don't exist, create the first one
+				settings = &config.Settings{
+					ActiveServer: server,
+					Servers:      []config.ServerConfig{{URL: server}},
+				}
+			} else {
+				// Check if server already exists
+				existing := settings.GetServerByURL(server)
+				if existing != nil {
+					// Server exists, just make it active
+					settings.ActiveServer = existing.URL
+				} else {
+					// Server does not exist, add it and make it active
+					settings.Servers = append(settings.Servers, config.ServerConfig{URL: server})
+					settings.ActiveServer = server
+				}
+			}
+
+			err = config.SaveSettings(settings)
 			if err != nil {
 				return fmt.Errorf("error saving settings: %w", err)
 			}
 
-			err = config.SaveCredentials(&config.Credentials{APIKey: key})
+			creds, err := config.LoadCredentials()
+			if err != nil {
+				creds = &config.Credentials{APIKeys: make(map[string]string)}
+			}
+			if creds.APIKeys == nil {
+				creds.APIKeys = make(map[string]string)
+			}
+			creds.APIKeys[server] = key
+
+			err = config.SaveCredentials(creds)
 			if err != nil {
 				return fmt.Errorf("error saving credentials: %w", err)
 			}
@@ -83,4 +116,98 @@ stored credentials.`,
 		},
 	}
 }
+
+func newAuthSwitchCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "switch",
+		Short: "Switch active server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			settings, err := config.LoadSettings()
+			if err != nil {
+				return fmt.Errorf("failed to load settings: %w", err)
+			}
+			if len(settings.Servers) == 0 {
+				return fmt.Errorf("no servers configured")
+			}
+
+			fmt.Fprintln(cmd.OutOrStdout(), "Select a server:")
+			for i, srv := range settings.Servers {
+				active := ""
+				if srv.URL == settings.ActiveServer {
+					active = " [ACTIVE]"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%d) %s%s\n", i+1, srv.URL, active)
+			}
+
+			fmt.Fprint(cmd.OutOrStdout(), "Enter number: ")
+			scanner := bufio.NewScanner(cmd.InOrStdin())
+			var choice int
+			if scanner.Scan() {
+				choiceStr := strings.TrimSpace(scanner.Text())
+				choice, _ = strconv.Atoi(choiceStr)
+			}
+
+			if choice < 1 || choice > len(settings.Servers) {
+				return fmt.Errorf("invalid choice")
+			}
+
+			settings.ActiveServer = settings.Servers[choice-1].URL
+			err = config.SaveSettings(settings)
+			if err != nil {
+				return fmt.Errorf("failed to save settings: %w", err)
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Switched to %s\n", settings.ActiveServer)
+			return nil
+		},
+	}
+}
+
+func newAuthStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show the current active server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			settings, err := config.LoadSettings()
+			if err != nil {
+				return fmt.Errorf("failed to load settings: %w", err)
+			}
+
+			active := settings.GetActiveServer()
+			if active == nil {
+				return fmt.Errorf("no active server configured")
+			}
+
+			fmt.Fprintf(cmd.OutOrStdout(), "Active server: %s\n", active.URL)
+			return nil
+		},
+	}
+}
+
+func newAuthListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List all configured servers",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			settings, err := config.LoadSettings()
+			if err != nil {
+				return fmt.Errorf("failed to load settings: %w", err)
+			}
+			if len(settings.Servers) == 0 {
+				return fmt.Errorf("no servers configured")
+			}
+
+			fmt.Fprintln(cmd.OutOrStdout(), "Configured servers:")
+			for _, srv := range settings.Servers {
+				active := ""
+				if srv.URL == settings.ActiveServer {
+					active = " [ACTIVE]"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "- %s%s\n", srv.URL, active)
+			}
+			return nil
+		},
+	}
+}
+
 

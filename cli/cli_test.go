@@ -55,8 +55,11 @@ func TestNewClient(t *testing.T) {
 		resetGlobals()
 		defer resetGlobals()
 
-		config.SaveSettings(&config.Settings{ServerURL: "http://config-server"})
-		config.SaveCredentials(&config.Credentials{APIKey: "config-key"})
+		config.SaveSettings(&config.Settings{
+			ActiveServer: "http://config-server",
+			Servers:      []config.ServerConfig{{URL: "http://config-server"}},
+		})
+		config.SaveCredentials(&config.Credentials{APIKeys: map[string]string{"http://config-server": "config-key"}})
 
 		client, err := newClient()
 		if err != nil {

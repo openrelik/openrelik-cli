@@ -141,6 +141,11 @@ configured for the specified harness.`,
 				return err
 			}
 
+			versionFile := filepath.Join(destDir, ".version")
+			if err := os.WriteFile(versionFile, []byte(Version+"\n"), 0644); err != nil {
+				return fmt.Errorf("failed to write .version file: %w", err)
+			}
+
 			fmt.Printf("Successfully generated skill file in %s/SKILL.md\n", destDir)
 			return nil
 		},

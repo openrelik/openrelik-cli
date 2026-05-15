@@ -34,10 +34,12 @@ type HarnessPaths struct {
 
 var harnesses = map[string]HarnessPaths{
 	"generic":     {"~/.agents/skills", ".agents/skills"},
-	"gemini-cli":  {"~/.gemini/skills", ".gemini/skills"},
-	"claude-code": {"~/.claude/skills", ".claude/skills"},
+	"codex":       {"~/.agents/skills", ".agents/skills"},
+	"gemini":      {"~/.gemini/skills", ".gemini/skills"},
+	"claude":      {"~/.claude/skills", ".claude/skills"},
 	"opencode":    {"~/.config/opencode/skills", ".opencode/skills"},
 	"pi":          {"~/.pi/agent/skills", ".pi/skills"},
+	"copilot":     {"~/.copilot/skills", ".github/skills"},
 }
 
 func newSkillCmd() *cobra.Command {
@@ -151,7 +153,7 @@ configured for the specified harness.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&harness, "harness", "generic", "Target agent framework (generic, gemini-cli, claude-code, opencode, pi)")
+	cmd.Flags().StringVar(&harness, "harness", "generic", "Target agent framework (generic, codex, gemini, claude, opencode, pi, copilot)")
 	cmd.Flags().BoolVar(&local, "local", false, "Install in the local directory according to the harness")
 
 	return cmd

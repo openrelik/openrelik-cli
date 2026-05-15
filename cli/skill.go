@@ -44,9 +44,10 @@ var harnesses = map[string]HarnessPaths{
 
 func newSkillCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "skill",
-		Short: "Manage AgentSkills for OpenRelik",
-		Long:  `Manage integrations with AgentSkills.io compliant AI assistants.`,
+		Use:     "skill",
+		Aliases: []string{"skills"},
+		Short:   "Manage AgentSkills for OpenRelik",
+		Long:    `Manage integrations with AgentSkills.io compliant AI assistants.`,
 	}
 
 	cmd.AddCommand(newSkillInstallCmd())

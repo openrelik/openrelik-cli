@@ -19,9 +19,10 @@ var (
 
 func newFileCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "file",
-		Short: "Manage files",
-		Long:  `Upload, download, and inspect files stored in OpenRelik.`,
+		Use:     "file",
+		Aliases: []string{"files"},
+		Short:   "Manage files",
+		Long:    `Upload, download, and inspect files stored in OpenRelik.`,
 	}
 
 	cmd.AddCommand(newListFilesCmd())
@@ -33,8 +34,9 @@ func newFileCmd() *cobra.Command {
 
 func newListFilesCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list <FOLDER_ID>",
-		Short: "List files in a folder",
+		Use:     "list <FOLDER_ID>",
+		Aliases: []string{"ls"},
+		Short:   "List files in a folder",
 		Long: `List all files contained in the specified folder.
 
 FOLDER_ID is the integer ID of the folder, as shown by 'folder list'.`,

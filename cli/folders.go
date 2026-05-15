@@ -20,9 +20,10 @@ var (
 
 func newFolderCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "folder",
-		Short: "Manage folders",
-		Long:  `Create, list, and mirror folders in OpenRelik.`,
+		Use:     "folder",
+		Aliases: []string{"folders"},
+		Short:   "Manage folders",
+		Long:    `Create, list, and mirror folders in OpenRelik.`,
 	}
 
 	cmd.AddCommand(newListFoldersCmd())
@@ -33,8 +34,9 @@ func newFolderCmd() *cobra.Command {
 
 func newListFoldersCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list [PARENT_ID]",
-		Short: "List folders",
+		Use:     "list [PARENT_ID]",
+		Aliases: []string{"ls"},
+		Short:   "List folders",
 		Long: `List folders in OpenRelik.
 
 Without PARENT_ID, lists all root folders. With PARENT_ID, lists the

@@ -11,9 +11,10 @@ import (
 
 func newWorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "workflow",
-		Short: "Manage workflows",
-		Long:  `Create, inspect, and run OpenRelik workflows.`,
+		Use:     "workflow",
+		Aliases: []string{"workflows"},
+		Short:   "Manage workflows",
+		Long:    `Create, inspect, and run OpenRelik workflows.`,
 	}
 
 	cmd.AddCommand(newWorkflowCreateCmd())

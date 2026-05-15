@@ -7,9 +7,10 @@ import (
 
 func newUserCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "user",
-		Short: "Manage users",
-		Long:  `Manage OpenRelik user accounts.`,
+		Use:     "user",
+		Aliases: []string{"users"},
+		Short:   "Manage users",
+		Long:    `Manage OpenRelik user accounts.`,
 	}
 
 	cmd.AddCommand(newMeCmd())

@@ -7,9 +7,10 @@ import (
 
 func newTemplateCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "template",
-		Short: "Manage workflow templates",
-		Long:  `Inspect workflow templates available in OpenRelik.`,
+		Use:     "template",
+		Aliases: []string{"templates"},
+		Short:   "Manage workflow templates",
+		Long:    `Inspect workflow templates available in OpenRelik.`,
 	}
 
 	cmd.AddCommand(newTemplateListCmd())
@@ -18,8 +19,9 @@ func newTemplateCmd() *cobra.Command {
 
 func newTemplateListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List available workflow templates",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List available workflow templates",
 		Long:  `List all workflow templates available in the system.`,
 		Example: `  # List all templates
   openrelik template list

@@ -198,8 +198,9 @@ func newAuthStatusCmd() *cobra.Command {
 
 func newAuthListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List all configured servers",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List all configured servers",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			settings, err := config.LoadSettings()
 			if err != nil {

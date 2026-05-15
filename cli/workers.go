@@ -22,9 +22,10 @@ import (
 
 func newWorkerCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "worker",
-		Short: "Manage workers",
-		Long:  `Inspect workers registered with OpenRelik.`,
+		Use:     "worker",
+		Aliases: []string{"workers"},
+		Short:   "Manage workers",
+		Long:    `Inspect workers registered with OpenRelik.`,
 	}
 
 	cmd.AddCommand(newListWorkersCmd())
@@ -33,8 +34,9 @@ func newWorkerCmd() *cobra.Command {
 
 func newListWorkersCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List registered workers",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List registered workers",
 		Long: `List all workers currently registered with the OpenRelik server.
 
 This command also refreshes the local worker cache used to generate

@@ -19,12 +19,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
 	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
+
+type HarnessPaths struct {
+	Global string
+	Local  string
+}
+
+var harnesses = map[string]HarnessPaths{
+	"generic":     {"~/.agents/skills", ".agents/skills"},
+	"gemini-cli":  {"~/.gemini/skills", ".gemini/skills"},
+	"claude-code": {"~/.claude/skills", ".claude/skills"},
+	"opencode":    {"~/.config/opencode/skills", ".opencode/skills"},
+	"pi":          {"~/.pi/agent/skills", ".pi/skills"},
+}
 
 func newSkillCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -38,6 +52,9 @@ func newSkillCmd() *cobra.Command {
 }
 
 func newSkillInstallCmd() *cobra.Command {
+	var harness string
+	var local bool
+
 	cmd := &cobra.Command{
 		Use:   "install [dir]",
 		Short: "Generate an AgentSkills SKILL.md file",
@@ -45,8 +62,8 @@ func newSkillInstallCmd() *cobra.Command {
 on the workers currently registered with the OpenRelik server.
 
 If a directory is provided, the skill will be installed in <dir>/openrelik.
-If no directory is provided, it defaults to '.agents/skills/openrelik' in the
-current working directory.`,
+If no directory is provided, it defaults to the global or local directory
+configured for the specified harness.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -64,9 +81,23 @@ current working directory.`,
 				return fmt.Errorf("failed to load workers: %w", err)
 			}
 
-			baseDir := ".agents/skills"
+			baseDir := ""
 			if len(args) > 0 {
 				baseDir = args[0]
+			} else {
+				paths, ok := harnesses[harness]
+				if !ok {
+					return fmt.Errorf("unknown harness: %s", harness)
+				}
+				if local {
+					baseDir = paths.Local
+				} else {
+					home, err := os.UserHomeDir()
+					if err != nil {
+						return fmt.Errorf("could not determine home directory: %w", err)
+					}
+					baseDir = strings.Replace(paths.Global, "~", home, 1)
+				}
 			}
 			destDir := filepath.Join(baseDir, "openrelik")
 
@@ -114,6 +145,9 @@ current working directory.`,
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&harness, "harness", "generic", "Target agent framework (generic, gemini-cli, claude-code, opencode, pi)")
+	cmd.Flags().BoolVar(&local, "local", false, "Install in the local directory according to the harness")
 
 	return cmd
 }

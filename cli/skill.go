@@ -17,9 +17,11 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/openrelik/openrelik-cli/config"
+	"github.com/openrelik/openrelik-cli/util"
 	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
@@ -67,6 +69,42 @@ current working directory.`,
 				baseDir = args[0]
 			}
 			destDir := filepath.Join(baseDir, "openrelik")
+
+			// Convert to absolute path for clearer user prompts
+			absDestDir, err := filepath.Abs(destDir)
+			if err != nil {
+				// Fallback to relative path if absolute path fails
+				absDestDir = destDir
+			}
+
+			// Check if the destination exists and confirm with user
+			info, err := os.Stat(destDir)
+			if err == nil {
+				if info.IsDir() {
+					fmt.Fprintf(cmd.OutOrStdout(), "Warning: Destination directory %s already exists.\n", absDestDir)
+					confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), "Overwrite?")
+					if err != nil {
+						return err
+					}
+					if !confirmed {
+						fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
+						return nil
+					}
+				} else {
+					return fmt.Errorf("destination %s exists and is not a directory", absDestDir)
+				}
+			} else if os.IsNotExist(err) {
+				confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), fmt.Sprintf("Create directory %s and install skill?", absDestDir))
+				if err != nil {
+					return err
+				}
+				if !confirmed {
+					fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
+					return nil
+				}
+			} else {
+				return err
+			}
 
 			if err := GenerateSkillFile(destDir, workers); err != nil {
 				return err

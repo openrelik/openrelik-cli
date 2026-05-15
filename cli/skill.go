@@ -114,8 +114,23 @@ configured for the specified harness.`,
 			info, err := os.Stat(destDir)
 			if err == nil {
 				if info.IsDir() {
-					fmt.Fprintf(cmd.OutOrStdout(), "Warning: Destination directory %s already exists.\n", absDestDir)
-					confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), "Overwrite?")
+					if !quiet {
+						fmt.Fprintf(cmd.OutOrStdout(), "Warning: Destination directory %s already exists.\n", absDestDir)
+						confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), "Overwrite?")
+						if err != nil {
+							return err
+						}
+						if !confirmed {
+							fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
+							return nil
+						}
+					}
+				} else {
+					return fmt.Errorf("destination %s exists and is not a directory", absDestDir)
+				}
+			} else if os.IsNotExist(err) {
+				if !quiet {
+					confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), fmt.Sprintf("Create directory %s and install skill?", absDestDir))
 					if err != nil {
 						return err
 					}
@@ -123,17 +138,6 @@ configured for the specified harness.`,
 						fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
 						return nil
 					}
-				} else {
-					return fmt.Errorf("destination %s exists and is not a directory", absDestDir)
-				}
-			} else if os.IsNotExist(err) {
-				confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), fmt.Sprintf("Create directory %s and install skill?", absDestDir))
-				if err != nil {
-					return err
-				}
-				if !confirmed {
-					fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
-					return nil
 				}
 			} else {
 				return err
@@ -148,7 +152,9 @@ configured for the specified harness.`,
 				return fmt.Errorf("failed to write .version file: %w", err)
 			}
 
-			fmt.Printf("Successfully generated skill file in %s/SKILL.md\n", destDir)
+			if !quiet {
+				fmt.Fprintf(cmd.OutOrStdout(), "Successfully generated skill file in %s/SKILL.md\n", absDestDir)
+			}
 			return nil
 		},
 	}

@@ -1,0 +1,32 @@
+---
+name: openrelik
+description: Execute OpenRelik workers to process files and analyze digital forensics artifacts.
+---
+
+# OpenRelik CLI Skill
+
+This skill provides access to all registered OpenRelik workers for forensic file processing.
+The OpenRelik CLI allows for running single workers or chaining multiple workers.
+
+## Available Tools (Workers)
+
+{{range .Workers}}
+### {{.DisplayName}}
+**Description:** {{.Description}}
+
+**CLI Command:** `openrelik run {{.CommandName}}`
+
+**Parameters:**
+{{- if .Config}}
+{{- range .Config}}
+*   `--{{.Name}}` ({{.Type}}): {{.Description}}{{if .Required}} **(Required)**{{end}}
+{{- end}}
+{{- else}}
+*(No specific parameters)*
+{{- end}}
+
+**Usage Example:**
+`openrelik run {{.CommandName}} [flags] <file_id_or_path>`
+
+---
+{{end}}

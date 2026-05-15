@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
+	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
 
@@ -41,6 +41,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newTemplateCmd())
 	cmd.AddCommand(newWorkflowCmd())
 	cmd.AddCommand(newRunCmd())
+	cmd.AddCommand(newSkillCmd())
 
 	return cmd
 }
@@ -85,7 +86,6 @@ var NewAPIClient = func() (*openrelik.Client, error) {
 
 	return openrelik.NewClient(s, k)
 }
-
 
 func newClient() (*openrelik.Client, error) { return NewAPIClient() }
 

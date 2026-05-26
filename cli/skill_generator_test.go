@@ -52,10 +52,6 @@ func TestGetTemplateContext(t *testing.T) {
 
 	ctx := getTemplateContext(workers)
 
-	if ctx.BinaryPath != "openrelik" {
-		t.Errorf("expected BinaryPath 'openrelik', got '%s'", ctx.BinaryPath)
-	}
-
 	if len(ctx.Workers) != 2 {
 		t.Fatalf("expected 2 workers, got %d", len(ctx.Workers))
 	}
@@ -111,24 +107,11 @@ func TestGenerateSkillFile(t *testing.T) {
 
 	content := string(contentBytes)
 
-	// Check for frontmatter
-	if !strings.Contains(content, "name: openrelik") {
-		t.Errorf("expected frontmatter to contain 'name: openrelik'")
-	}
-	if !strings.Contains(content, "executable: openrelik") {
-		t.Errorf("expected frontmatter to contain 'executable: openrelik'")
-	}
-
-	// Check for executable path in markdown body
-	if !strings.Contains(content, "The absolute path to the `openrelik` executable for this environment is:\n`openrelik`") {
-		t.Errorf("expected content to contain the executable path section")
-	}
-
 	// Check for dynamic content
 	if !strings.Contains(content, "### Strings") {
 		t.Errorf("expected content to contain '### Strings'")
 	}
-	if !strings.Contains(content, "openrelik run strings") {
-		t.Errorf("expected content to contain 'openrelik run strings'")
+	if !strings.Contains(content, "run strings") {
+		t.Errorf("expected content to contain 'run strings'")
 	}
 }

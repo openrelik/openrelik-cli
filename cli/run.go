@@ -31,7 +31,7 @@ import (
 func newRunCmd() *cobra.Command {
 	runCmd := &cobra.Command{
 		Use:   "run",
-		Short: "Run a worker on files",
+		Short: "Create and run workflows",
 		Long: `Execute OpenRelik workers on files.
 
 Subcommands are dynamically generated from registered workers. Run

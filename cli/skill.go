@@ -46,7 +46,7 @@ func newSkillCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "skill",
 		Aliases: []string{"skills"},
-		Short:   "Manage AgentSkills for OpenRelik",
+		Short:   "Manage AgentSkills",
 		Long:    `Manage integrations with AgentSkills.io compliant AI assistants.`,
 	}
 

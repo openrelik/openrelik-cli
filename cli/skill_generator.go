@@ -39,7 +39,8 @@ type SkillWorker struct {
 
 // TemplateContext holds the data required to render SKILL.md.
 type TemplateContext struct {
-	Workers []SkillWorker
+	BinaryPath string
+	Workers    []SkillWorker
 }
 
 // getTemplateContext converts raw OpenRelik workers into our template-friendly structs.
@@ -63,7 +64,48 @@ func getTemplateContext(workers []openrelik.Worker) *TemplateContext {
 			Config:      w.TaskConfig,
 		})
 	}
-	return &TemplateContext{Workers: skillWorkers}
+	return &TemplateContext{
+		BinaryPath: getBinaryPath(),
+		Workers:    skillWorkers,
+	}
+}
+
+// getBinaryPath returns the path to the executable running the command.
+func getBinaryPath() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "openrelik"
+	}
+
+	// Resolve symlinks to get the actual binary path
+	realExe, err := filepath.EvalSymlinks(exe)
+	if err == nil {
+		exe = realExe
+	}
+
+	// Check if running in a test or under 'go run' (which builds a temp executable)
+	base := filepath.Base(exe)
+	isTemp := strings.Contains(exe, "go-build") || strings.HasPrefix(exe, os.TempDir())
+	isTest := strings.HasSuffix(base, ".test") || strings.Contains(base, "test")
+
+	if isTemp || isTest {
+		// If running via go run in development, fallback to "go run <abs_main_path>"
+		// if main.go exists in the current directory, or "openrelik" if not.
+		if !isTest {
+			if _, err := os.Stat("main.go"); err == nil {
+				if absMain, err := filepath.Abs("main.go"); err == nil {
+					return fmt.Sprintf("go run %s", absMain)
+				}
+			}
+		}
+		return "openrelik"
+	}
+
+	// Clean the path to make it absolute
+	if absExe, err := filepath.Abs(exe); err == nil {
+		return absExe
+	}
+	return exe
 }
 
 // GenerateSkillFile creates the directory structure and outputs the compiled SKILL.md

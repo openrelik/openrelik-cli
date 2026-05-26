@@ -21,7 +21,7 @@ func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:              "openrelik",
 		Short:            "OpenRelik CLI client",
-		Long:             `A command line tool to interact with the OpenRelik API`,
+		Long:             `A command line tool to interact with OpenRelik`,
 		Version:          Version,
 		TraverseChildren: true,
 		SilenceErrors:    true,

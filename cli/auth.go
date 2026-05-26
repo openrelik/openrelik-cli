@@ -222,5 +222,3 @@ func newAuthListCmd() *cobra.Command {
 		},
 	}
 }
-
-

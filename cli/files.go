@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/util"
+	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
 
@@ -45,7 +45,7 @@ FOLDER_ID is the integer ID of the folder, as shown by 'folder list'.`,
 
   # Output as JSON
   openrelik file list 42 --format json`,
-		Args:  util.UseArgs(),
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fID, err := strconv.Atoi(args[0])
 			if err != nil {
@@ -80,7 +80,7 @@ ID is the integer file ID, as shown by 'file list'.`,
 
   # Output as JSON
   openrelik file info 123 --format json`,
-		Args:  util.UseArgs(),
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fileID, err := strconv.Atoi(args[0])
 			if err != nil {

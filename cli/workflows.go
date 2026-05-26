@@ -110,7 +110,7 @@ WORKFLOW_ID is the integer ID of the workflow.`,
 
   # Output as JSON
   openrelik workflow info 99 --format json`,
-		Args:  util.UseArgs(),
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wID, err := strconv.Atoi(args[0])
 			if err != nil {
@@ -144,7 +144,7 @@ WORKFLOW_ID is the integer ID of the workflow.`,
 
   # Poll status in a shell loop
   watch -n 5 openrelik workflow status 99`,
-		Args:  util.UseArgs(),
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wID, err := strconv.Atoi(args[0])
 			if err != nil {
@@ -201,7 +201,7 @@ monitor progress after starting.`,
 
   # Run with a custom spec
   openrelik workflow run 99 --spec '{"type":"chain","tasks":[]}'`,
-		Args:  util.UseArgs(),
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wID, err := strconv.Atoi(args[0])
 			if err != nil {

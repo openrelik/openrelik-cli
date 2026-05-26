@@ -22,16 +22,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
+	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
 
 func newRunCmd() *cobra.Command {
 	runCmd := &cobra.Command{
 		Use:   "run",
-		Short: "Run a worker on files",
+		Short: "Create and run workflows",
 		Long: `Execute OpenRelik workers on files.
 
 Subcommands are dynamically generated from registered workers. Run

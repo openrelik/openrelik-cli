@@ -165,7 +165,6 @@ func LoadCredentials() (*Credentials, error) {
 	return &c, nil
 }
 
-
 func SaveCredentials(c *Credentials) error {
 	dir, err := EnsureConfigDir()
 	if err != nil {

@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 
-	openrelik "github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/util"
+	openrelik "github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
 
@@ -50,7 +50,7 @@ by a previous 'folder list' call.`,
 
   # Output as JSON
   openrelik folder list --format json`,
-		Args:  util.UseArgs(),
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var pID int
 			var err error

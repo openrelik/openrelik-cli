@@ -22,7 +22,7 @@ func newTemplateListCmd() *cobra.Command {
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List available workflow templates",
-		Long:  `List all workflow templates available in the system.`,
+		Long:    `List all workflow templates available in the system.`,
 		Example: `  # List all templates
   openrelik template list
 

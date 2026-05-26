@@ -20,9 +20,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
+	"github.com/openrelik/openrelik-go-client"
 )
 
 func TestDynamicWorkerCommands(t *testing.T) {

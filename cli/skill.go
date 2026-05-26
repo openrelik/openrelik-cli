@@ -33,13 +33,13 @@ type HarnessPaths struct {
 }
 
 var harnesses = map[string]HarnessPaths{
-	"generic":     {"~/.agents/skills", ".agents/skills"},
-	"codex":       {"~/.agents/skills", ".agents/skills"},
-	"gemini":      {"~/.gemini/skills", ".gemini/skills"},
-	"claude":      {"~/.claude/skills", ".claude/skills"},
-	"opencode":    {"~/.config/opencode/skills", ".opencode/skills"},
-	"pi":          {"~/.pi/agent/skills", ".pi/skills"},
-	"copilot":     {"~/.copilot/skills", ".github/skills"},
+	"generic":  {"~/.agents/skills", ".agents/skills"},
+	"codex":    {"~/.agents/skills", ".agents/skills"},
+	"gemini":   {"~/.gemini/skills", ".gemini/skills"},
+	"claude":   {"~/.claude/skills", ".claude/skills"},
+	"opencode": {"~/.config/opencode/skills", ".opencode/skills"},
+	"pi":       {"~/.pi/agent/skills", ".pi/skills"},
+	"copilot":  {"~/.copilot/skills", ".github/skills"},
 }
 
 func newSkillCmd() *cobra.Command {

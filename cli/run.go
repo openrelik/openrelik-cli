@@ -22,9 +22,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openrelik/openrelik-go-client"
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
+	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
 

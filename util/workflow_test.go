@@ -100,7 +100,7 @@ func TestGetOrCreateFolder(t *testing.T) {
 
 func TestWorkflowMonitor_NonInteractive(t *testing.T) {
 	workflow := &openrelik.Workflow{
-		ID: 100,
+		ID:     100,
 		Folder: openrelik.Folder{ID: 1},
 	}
 
@@ -161,7 +161,7 @@ func TestWorkflowMonitor_PrintSummary(t *testing.T) {
 	m := &WorkflowMonitor{showProgress: true, taskShortNames: []string{"T1", "T2"}}
 	// This mainly tests that it doesn't crash
 	m.PrintSummary(time.Now().Add(-10*time.Second), 1024, 2048)
-	
+
 	m.showProgress = false
 	m.PrintSummary(time.Now().Add(-10*time.Second), 1024, 2048)
 }

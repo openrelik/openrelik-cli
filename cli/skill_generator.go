@@ -77,12 +77,6 @@ func getBinaryPath() string {
 		return "openrelik"
 	}
 
-	// Resolve symlinks to get the actual binary path
-	realExe, err := filepath.EvalSymlinks(exe)
-	if err == nil {
-		exe = realExe
-	}
-
 	// Check if running in a test or under 'go run' (which builds a temp executable)
 	base := filepath.Base(exe)
 	isTemp := strings.Contains(exe, "go-build") || strings.HasPrefix(exe, os.TempDir())

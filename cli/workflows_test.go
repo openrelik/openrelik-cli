@@ -16,13 +16,13 @@ func TestWorkflowCmd(t *testing.T) {
 	// Mock API server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		
+
 		// Info
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/workflows/123" {
 			fmt.Fprintln(w, `{"id": 123, "display_name": "Test Workflow", "folder": {"id": 1}}`)
 			return
 		}
-		
+
 		// Status
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/folders/1/workflows/123/status/" {
 			fmt.Fprintln(w, `{"status": "completed", "tasks": []}`)
@@ -117,13 +117,13 @@ func TestWorkflowRunSpec(t *testing.T) {
 	// Mock API server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		
+
 		// Get workflow (called first by run cmd)
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/workflows/123" {
 			fmt.Fprintln(w, `{"id": 123, "folder": {"id": 1}, "spec_json": "{\"test\":\"spec\"}"}`)
 			return
 		}
-		
+
 		// Run workflow
 		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/folders/1/workflows/123/run/" {
 			body, _ := io.ReadAll(r.Body)
@@ -134,14 +134,14 @@ func TestWorkflowRunSpec(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			
+
 			// Verify that the spec_json from the workflow was passed
 			if string(req.WorkflowSpec) != `{"test":"spec"}` {
 				w.WriteHeader(http.StatusUnprocessableEntity)
 				fmt.Fprintf(w, `{"error": "expected spec {\"test\":\"spec\"}, got %s"}`, string(req.WorkflowSpec))
 				return
 			}
-			
+
 			fmt.Fprintln(w, `{"id": 123, "display_name": "Running Workflow"}`)
 			return
 		}

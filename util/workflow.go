@@ -494,4 +494,3 @@ func FlattenTasks(tasks []openrelik.Task) []openrelik.Task {
 	}
 	return flattened
 }
-

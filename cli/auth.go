@@ -11,6 +11,7 @@ import (
 
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
+	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -72,6 +73,15 @@ stored credentials.`,
 
 			if key == "" {
 				return fmt.Errorf("API key is required")
+			}
+
+			client, err := openrelik.NewClient(server, key)
+			if err != nil {
+				return fmt.Errorf("failed to initialize client: %w", err)
+			}
+			_, _, err = client.Users().GetMe(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("failed to login: %w", err)
 			}
 
 			settings, err := config.LoadSettings()

@@ -2,6 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/openrelik/openrelik-cli/config"
@@ -21,6 +25,16 @@ func TestLoginCmd(t *testing.T) {
 	defer func() { passwordReader = originalPasswordReader }()
 
 	t.Run("SuccessfulLogin", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/users/me/" {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, `{"id": 1, "username": "testuser", "display_name": "Test User", "is_admin": true}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
 		root := NewRootCmd()
 		out := new(bytes.Buffer)
 		in := new(bytes.Buffer)
@@ -28,7 +42,7 @@ func TestLoginCmd(t *testing.T) {
 		root.SetIn(in)
 
 		// Provide input for server URL
-		in.WriteString("http://test-server\n")
+		in.WriteString(server.URL + "\n")
 
 		root.SetArgs([]string{"auth", "login"})
 
@@ -43,19 +57,29 @@ func TestLoginCmd(t *testing.T) {
 		// Verify config was saved
 		s, _ := config.LoadSettings()
 		active := s.GetActiveServer()
-		if active == nil || active.URL != "http://test-server" {
-			t.Errorf("expected server URL %q, got %+v", "http://test-server", active)
+		if active == nil || active.URL != server.URL {
+			t.Errorf("expected server URL %q, got %+v", server.URL, active)
 		}
-		if s.ActiveServer != "http://test-server" {
-			t.Errorf("expected active server %q, got %q", "http://test-server", s.ActiveServer)
+		if s.ActiveServer != server.URL {
+			t.Errorf("expected active server %q, got %q", server.URL, s.ActiveServer)
 		}
 		c, _ := config.LoadCredentials()
-		if c.APIKeys["http://test-server"] != "test-api-key" {
-			t.Errorf("expected API key %q, got %q", "test-api-key", c.APIKeys["http://test-server"])
+		if c.APIKeys[server.URL] != "test-api-key" {
+			t.Errorf("expected API key %q, got %q", "test-api-key", c.APIKeys[server.URL])
 		}
 	})
 
 	t.Run("LoginAddsNewServer", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/users/me/" {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, `{"id": 1, "username": "testuser", "display_name": "Test User", "is_admin": true}`)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
 		// Setup initial settings
 		s := &config.Settings{
 			ActiveServer: "http://initial-server",
@@ -69,7 +93,7 @@ func TestLoginCmd(t *testing.T) {
 		root.SetOut(out)
 		root.SetIn(in)
 
-		in.WriteString("http://new-server\n")
+		in.WriteString(server.URL + "\n")
 		root.SetArgs([]string{"auth", "login"})
 
 		if err := root.Execute(); err != nil {
@@ -80,8 +104,32 @@ func TestLoginCmd(t *testing.T) {
 		if len(s.Servers) != 2 {
 			t.Errorf("expected 2 servers, got %d", len(s.Servers))
 		}
-		if s.ActiveServer != "http://new-server" {
-			t.Errorf("expected active server to be http://new-server, got %s", s.ActiveServer)
+		if s.ActiveServer != server.URL {
+			t.Errorf("expected active server to be %s, got %s", server.URL, s.ActiveServer)
+		}
+	})
+
+	t.Run("FailedLoginInvalidCredentials", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer server.Close()
+
+		root := NewRootCmd()
+		out := new(bytes.Buffer)
+		in := new(bytes.Buffer)
+		root.SetOut(out)
+		root.SetIn(in)
+
+		in.WriteString(server.URL + "\n")
+		root.SetArgs([]string{"auth", "login"})
+
+		err := root.Execute()
+		if err == nil {
+			t.Fatal("expected error for invalid credentials, got nil")
+		}
+		if !strings.Contains(err.Error(), "failed to login") {
+			t.Errorf("expected error to contain %q, got %q", "failed to login", err.Error())
 		}
 	})
 

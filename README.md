@@ -5,6 +5,7 @@ A command-line interface for the OpenRelik API. It provides direct management of
 ## Features
 
 - **Resource Management:** Create and list folders, and upload files and local directories directly into OpenRelik.
+- **Sharing:** Share folders with users and groups as viewer, editor or owner, and see who has access.
 - **Workflow Execution:** Execute tasks on remote files or local paths (e.g., string extraction, grepping, malware analysis). Subcommands are dynamically generated from registered workers.
 - **Execution Topologies:** Chain workers sequentially (`--then`) or execute them in parallel (`--and`).
 - **Data Formatting:** Output responses in human-readable tables, verbose structures, or JSON for integration into external pipelines.
@@ -143,10 +144,13 @@ openrelik user me --format json
 
 Organize files in hierarchical directories.
 
-*   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"` (a leading `/`, as `folder search` prints paths, is optional); an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
+*   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"` (a leading `/`, as `folder search` prints paths, is optional); an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated. The root listing includes folders other users shared with you; `--shared` lists only those, with their owners.
 *   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list`, `upload` and `folder create --parent`. All matches are shown; use `--limit N` to show only the N most recently updated. `--sort` and `-r` work as in `folder list`. Use `--latest` to show only the most recently updated match, and `--root` to search only root folders (and folders shared with you).
 *   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name like `tree`, so the structure is easy to scan (`folder list` and `folder search` sort by last update like `ls -latr`, so the latest work is shown last); use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes.
 *   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder. Use `--exist-ok` to print an existing folder with the same name in that location instead of creating a duplicate, which makes scripts safe to re-run. If several such folders exist it fails and lists them; add `--latest` to use the most recently updated one.
+*   `folder share <FOLDER>`: Give users (`--user NAME`) and groups (`--group NAME`) a role on a folder with `--role viewer|editor|owner` (required). Both flags can be repeated. Sharing a folder gives access to all its files and subfolders; files can't be shared on their own. A user or group that already has a role ends up with only the new one (the new role is added before the old one is removed). Each user and group is reported; if any fail, the rest are still shared and the command exits non-zero. Changes that would leave the folder without an owner are refused, and lowering your own role asks first (`--force` skips the question).
+*   `folder unshare <FOLDER>`: Remove every role the given `--user` and `--group` have on the folder. Roles on parent folders still give access; the command warns about them. Removing your own role asks first (`--force` skips the question).
+*   `folder access <FOLDER>`: Show your role on a folder, and the users and groups with a role on it or on its parent folders, with the folder each role is set on.
 
 #### Examples
 
@@ -171,6 +175,14 @@ openrelik folder search plaso
 
 # Show everything below a folder as a tree
 openrelik folder tree "Case A/"
+
+# Let alice view a case folder, and give the IR team edit access
+openrelik folder share "Case A/" --user alice --role viewer
+openrelik folder share "Case A/" --group ir-team --role editor
+
+# See who can access it, then remove alice's access
+openrelik folder access "Case A/"
+openrelik folder unshare "Case A/" --user alice
 ```
 
 ### Uploading and Downloading (`upload`, `download`)

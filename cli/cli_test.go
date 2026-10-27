@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/openrelik/openrelik-cli/config"
@@ -97,4 +101,65 @@ func TestNewClient(t *testing.T) {
 			t.Error("expected error for missing API key, got nil")
 		}
 	})
+}
+
+func TestUnknownSubcommand(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+
+	// The run command fetches workers at construction; fail that quickly.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantErr    []string
+		wantOutput string
+	}{
+		{name: "unknown root command", args: []string{"bogus"}, wantErr: []string{`unknown command "bogus" for "openrelik"`}},
+		{name: "unknown group subcommand", args: []string{"file", "bogus", "42"}, wantErr: []string{`unknown command "bogus" for "openrelik file"`, "Run 'openrelik file --help' for usage."}},
+		{name: "removed file list", args: []string{"file", "ls", "42", "--format", "json"}, wantErr: []string{"'openrelik file list' was removed", "openrelik folder list <FOLDER_ID>", ".files[]"}},
+		{name: "removed file upload", args: []string{"files", "upload", "a.txt", "42", "--chunk-size", "8"}, wantErr: []string{"'openrelik file upload' was removed", "openrelik upload <FILE_PATH>... --folder <FOLDER_ID>"}},
+		{name: "removed file download", args: []string{"file", "download", "123"}, wantErr: []string{"'openrelik file download' was removed", "openrelik download --file <ID>"}},
+		{name: "removed folder mirror", args: []string{"folder", "mirror", "./evidence", "42"}, wantErr: []string{"'openrelik folder mirror' was removed", "openrelik upload <LOCAL_FOLDER>", "created as a subfolder"}},
+		{name: "suggests close match", args: []string{"folder", "lst"}, wantErr: []string{"Did you mean this?", "list"}},
+		{name: "run without workers", args: []string{"run", "strings"}, wantErr: []string{`unknown command "strings" for "openrelik run"`}},
+		{name: "bare group shows help", args: []string{"file"}, wantOutput: "Usage:"},
+		{name: "help for removed command shows the notice", args: []string{"help", "folder", "mirror"}, wantOutput: "This command was removed. Use instead:\n\n  openrelik upload <LOCAL_FOLDER>"},
+		{name: "bare root shows help", args: []string{}, wantOutput: "Usage:"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := NewRootCmd()
+			out := new(bytes.Buffer)
+			root.SetOut(out)
+			root.SetErr(out)
+			root.SetArgs(tt.args)
+
+			err := root.Execute()
+			if len(tt.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+				for _, want := range tt.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("expected error to contain %q, got %q", want, err.Error())
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if !strings.Contains(out.String(), tt.wantOutput) {
+				t.Errorf("expected output to contain %q, got %q", tt.wantOutput, out.String())
+			}
+		})
+	}
 }

@@ -50,52 +50,59 @@ func TestIsTerminalTaskStatus(t *testing.T) {
 }
 
 func TestGetOrCreateFolder(t *testing.T) {
-	mux := http.NewServeMux()
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	client, _ := openrelik.NewClient(server.URL, "test-key")
 	ctx := context.Background()
 
-	t.Run("Existing Folder", func(t *testing.T) {
-		mux.HandleFunc("/api/v1/folders/all/", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"folders": [{"id": 1, "display_name": "existing-folder"}]}`)
-		})
+	tests := []struct {
+		name    string
+		folders string // JSON list of root folders; the current user has ID 7
+		wantID  int
+		created bool
+	}{
+		{name: "existing folder", folders: `{"id": 1, "display_name": "uploads", "user": {"id": 7}}`, wantID: 1},
+		{name: "creates when missing", folders: `{"id": 1, "display_name": "other", "user": {"id": 7}}`, wantID: 2, created: true},
+		{name: "ignores folders shared by others", folders: `{"id": 1, "display_name": "uploads", "user": {"id": 8}}`, wantID: 2, created: true},
+		{
+			name:    "duplicates use the most recently updated",
+			folders: `{"id": 1, "display_name": "uploads", "user": {"id": 7}, "updated_at": "2026-01-01T00:00:00Z"}, {"id": 3, "display_name": "uploads", "user": {"id": 7}, "updated_at": "2026-02-01T00:00:00Z"}`,
+			wantID:  3,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			server := httptest.NewServer(mux)
+			defer server.Close()
+			client, _ := openrelik.NewClient(server.URL, "test-key")
 
-		folder, err := GetOrCreateFolder(ctx, client, "existing-folder")
-		if err != nil {
-			t.Fatalf("GetOrCreateFolder failed: %v", err)
-		}
-		if folder.ID != 1 {
-			t.Errorf("Expected ID 1, got %d", folder.ID)
-		}
-	})
-
-	t.Run("Create New Folder", func(t *testing.T) {
-		// New mux to avoid conflict
-		mux := http.NewServeMux()
-		server.Config.Handler = mux
-
-		mux.HandleFunc("/api/v1/folders/all/", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"folders": []}`)
-		})
-		mux.HandleFunc("/api/v1/folders/", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost {
+			mux.HandleFunc("/api/v1/users/me/", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, `{"id": 2, "display_name": "new-folder"}`)
+				fmt.Fprint(w, `{"id": 7}`)
+			})
+			mux.HandleFunc("/api/v1/folders/all/", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintf(w, `{"folders": [%s], "page": 1, "page_size": 100, "total_count": 0}`, tt.folders)
+			})
+			created := false
+			mux.HandleFunc("/api/v1/folders/", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					created = true
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, `{"id": 2, "display_name": "uploads"}`)
+				}
+			})
+
+			folder, err := GetOrCreateFolder(ctx, client, "uploads")
+			if err != nil {
+				t.Fatalf("GetOrCreateFolder failed: %v", err)
+			}
+			if folder.ID != tt.wantID {
+				t.Errorf("got folder %d, want %d", folder.ID, tt.wantID)
+			}
+			if created != tt.created {
+				t.Errorf("created = %v, want %v", created, tt.created)
 			}
 		})
-
-		folder, err := GetOrCreateFolder(ctx, client, "new-folder")
-		if err != nil {
-			t.Fatalf("GetOrCreateFolder failed: %v", err)
-		}
-		if folder.ID != 2 {
-			t.Errorf("Expected ID 2, got %d", folder.ID)
-		}
-	})
+	}
 }
 
 func TestWorkflowMonitor_NonInteractive(t *testing.T) {

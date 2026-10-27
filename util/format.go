@@ -24,6 +24,12 @@ type JSONUnwrapper interface {
 	UnwrapJSON() any
 }
 
+// VerboseRenderer is implemented by view types whose verbose output can't be
+// produced by reflecting over their JSON form, e.g. objects holding slices.
+type VerboseRenderer interface {
+	RenderVerbose(w io.Writer) error
+}
+
 // PrintStruct nicely prints the fields of a struct to stdout.
 func PrintStruct(s interface{}) {
 	FprintStruct(os.Stdout, s)

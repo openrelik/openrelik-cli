@@ -39,6 +39,45 @@ func UseArgs() cobra.PositionalArgs {
 	}
 }
 
+// UseArgsWithQuoteHint is UseArgs for commands whose last argument may
+// contain spaces, such as folder names and paths. When there are too many
+// arguments, the error suggests quoting them, since the shell most likely
+// split an unquoted argument on its spaces. flags names the command's flags
+// whose values may also contain spaces; if one was set, the split may have
+// come from its value instead, so the hint mentions both.
+func UseArgsWithQuoteHint(flags ...string) cobra.PositionalArgs {
+	validate := UseArgs()
+	return func(cmd *cobra.Command, args []string) error {
+		err := validate(cmd, args)
+		if err == nil {
+			return nil
+		}
+		required, optional, variadic := parseUseArgs(cmd.Use)
+		max := len(required) + len(optional)
+		if variadic || max == 0 || len(args) <= max {
+			return err
+		}
+		var last string
+		if len(optional) > 0 {
+			last = optional[len(optional)-1]
+		} else {
+			last = required[len(required)-1]
+		}
+		var set []string
+		for _, f := range flags {
+			if cmd.Flags().Changed(f) {
+				set = append(set, "--"+f)
+			}
+		}
+		if len(set) > 0 {
+			return fmt.Errorf("too many arguments: expected at most %d, got %d\nQuote %s and the %s value if they contain spaces.",
+				max, len(args), last, strings.Join(set, " and "))
+		}
+		return fmt.Errorf("too many arguments: expected at most %d, got %d\nQuote %s if it contains spaces: %q",
+			max, len(args), last, strings.Join(args[max-1:], " "))
+	}
+}
+
 func parseUseArgs(use string) (required []string, optional []string, variadic bool) {
 	for _, token := range strings.Fields(use) {
 		if strings.HasPrefix(token, "<") && strings.HasSuffix(token, ">") {

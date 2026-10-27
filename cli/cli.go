@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
@@ -40,10 +41,45 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newWorkerCmd())
 	cmd.AddCommand(newTemplateCmd())
 	cmd.AddCommand(newWorkflowCmd())
+	cmd.AddCommand(newUploadCmd())
+	cmd.AddCommand(newDownloadCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newSkillCmd())
 
+	requireKnownSubcommands(cmd)
 	return cmd
+}
+
+// requireKnownSubcommands makes every command group in the tree (commands
+// without their own action, including the root) show help when run without
+// arguments and fail on an unknown subcommand. Without this, Cobra prints
+// help and exits 0 for 'openrelik file bogus' because TraverseChildren skips
+// its unknown-command check.
+func requireKnownSubcommands(cmd *cobra.Command) {
+	if !cmd.Runnable() {
+		cmd.Args = unknownSubcommandArgs
+		cmd.RunE = func(cmd *cobra.Command, args []string) error { return cmd.Help() }
+	}
+	for _, c := range cmd.Commands() {
+		requireKnownSubcommands(c)
+	}
+}
+
+// unknownSubcommandArgs rejects any positional argument to a command group,
+// suggesting close matches like Cobra does for the root command.
+func unknownSubcommandArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+	if cmd.SuggestionsMinimumDistance <= 0 {
+		// Cobra only applies its default in its own unknown-command check.
+		cmd.SuggestionsMinimumDistance = 2
+	}
+	if suggestions := cmd.SuggestionsFor(args[0]); len(suggestions) > 0 {
+		msg += "\n\nDid you mean this?\n\t" + strings.Join(suggestions, "\n\t")
+	}
+	return fmt.Errorf("%s\n\nRun '%s --help' for usage.", msg, cmd.CommandPath())
 }
 
 // NewAPIClient can be replaced to customize how the API client is constructed:
@@ -102,6 +138,9 @@ func formatAndPrint(cmd *cobra.Command, result interface{}) error {
 		}
 		return util.FprintJSON(cmd.OutOrStdout(), payload)
 	case "verbose":
+		if vr, ok := result.(util.VerboseRenderer); ok {
+			return vr.RenderVerbose(cmd.OutOrStdout())
+		}
 		payload := result
 		if u, ok := result.(util.JSONUnwrapper); ok {
 			payload = u.UnwrapJSON()
@@ -115,6 +154,16 @@ func formatAndPrint(cmd *cobra.Command, result interface{}) error {
 		util.FprintStruct(cmd.OutOrStdout(), result)
 		return nil
 	}
+}
+
+// printTruncationHint tells the user on stderr that a list was truncated.
+// It is only shown for human output so piped and JSON output stay clean.
+// advice tells the user how to see the rest, e.g. "Omit --limit to see all."
+func printTruncationHint(cmd *cobra.Command, shown, total int, noun, advice string) {
+	if quiet || outputFormat != "human" || shown >= total {
+		return
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "\nShowing %d of %d %s. %s\n", shown, total, noun, advice)
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

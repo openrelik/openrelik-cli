@@ -2,10 +2,15 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/openrelik/openrelik-cli/util"
@@ -16,41 +21,48 @@ import (
 // Top-level commands that move data between the local machine and OpenRelik.
 
 func newUploadCmd() *cobra.Command {
-	var folder string
 	var name string
 	var chunkSize, maxDepth int
+	var force bool
 
 	cmd := &cobra.Command{
-		Use:   "upload <PATH> [PATH...]",
+		Use:   "upload <PATH> [PATH...] [FOLDER]",
 		Short: "Upload files and directories",
 		Long: `Upload local files and directories to an OpenRelik folder using resumable
 chunked uploads with progress tracking.
 
-Directories are uploaded recursively up to --depth levels deep, and each
-one is recreated as a folder of the same name in the destination.
+With more than one argument, the last one is the existing folder to upload
+into, given as a folder ID or a path of folder names as accepted by
+'folder list'. Directories are uploaded recursively up to --depth levels
+deep, and each one is recreated as a subfolder of the same name, as with
+'cp -r'.
 
-With --folder, uploads go into that existing folder, given as a folder ID
-or a path of folder names as accepted by 'folder list'. Without it, a new
-root folder is created: for a single directory it is named after the
-directory and holds its contents; otherwise it is named after the current
-time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
+With a single argument, or with "/" as FOLDER, a new root folder is
+created instead, since files can't be stored directly at the root. A
+single directory becomes the new root folder itself; anything else goes
+into a root folder named after the current time, e.g.
+"Upload 2026-10-27 14:05". Use --name to choose the name.
+
+Files given directly are skipped if FOLDER already holds a file with the
+same name and SHA256, so an interrupted upload can be run again. If the
+server has no hash for a file with the same name and size (very large
+files aren't hashed, and hashing runs in the background), you are asked
+whether to upload it; without a terminal to ask on, the upload fails
+instead. Use --force to upload without checking.`,
 		Example: `  # Upload a file to folder 42
-  openrelik upload report.pdf --folder 42
+  openrelik upload report.pdf 42
 
-  # Upload several files to folder 42
-  openrelik upload *.E01 --folder 42
-
-  # Upload to a folder by its path
-  openrelik upload disk.E01 --folder "Case A/evidence/"
+  # Upload several files to a folder by its path
+  openrelik upload *.E01 "Case A/evidence/"
 
   # Upload a directory into a new root folder named "evidence"
   openrelik upload ./evidence/
 
   # Upload files into a new root folder with a chosen name
-  openrelik upload disk.E01 memory.raw --name "Case 2026-001"
+  openrelik upload disk.E01 memory.raw / --name "Case 2026-001"
 
   # Use a larger chunk size (bytes) for fast networks
-  openrelik upload large.bin --folder 42 --chunk-size 8388608`,
+  openrelik upload large.bin 42 --chunk-size 8388608`,
 		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if maxDepth < 0 {
@@ -60,15 +72,39 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 				return fmt.Errorf("invalid chunk size: %d (must be greater than 0)", chunkSize)
 			}
 
+			// With more than one argument, the last is the destination folder.
+			sources, dest := args, ""
+			if n := len(args); n > 1 {
+				sources, dest = args[:n-1], args[n-1]
+			}
+			newRoot := dest == "" || dest == "/"
+			if name != "" && !newRoot {
+				return fmt.Errorf(`--name only applies when creating a new root folder (no FOLDER, or FOLDER "/")`)
+			}
+
 			// Check every path up front so nothing is created for a typo.
-			isDir := make([]bool, len(args))
-			for i, p := range args {
+			// A path given more than once, under any name, is uploaded once.
+			var unique []string
+			var infos []os.FileInfo
+			var isDir []bool
+			var sizes []int64
+			for _, p := range sources {
+				if abs, err := filepath.Abs(p); err == nil && filepath.Dir(abs) == abs {
+					return fmt.Errorf("refusing to upload the filesystem root %q", p)
+				}
 				info, err := os.Stat(p)
 				if err != nil {
 					return err
 				}
-				isDir[i] = info.IsDir()
+				if slices.ContainsFunc(infos, func(seen os.FileInfo) bool { return os.SameFile(seen, info) }) {
+					continue
+				}
+				unique = append(unique, p)
+				infos = append(infos, info)
+				isDir = append(isDir, info.IsDir())
+				sizes = append(sizes, info.Size())
 			}
+			sources = unique
 
 			client, err := newClient()
 			if err != nil {
@@ -79,15 +115,33 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 			view := &UploadView{}
 			// A single directory becomes the new root folder itself.
 			single := false
-			if cmd.Flags().Changed("folder") {
-				view.FolderID, err = resolveFolder(cmd.Context(), client, folder)
+			if !newRoot {
+				view.FolderID, err = resolveFolder(cmd.Context(), client, dest)
 				if err != nil {
+					// The user may have left out the destination, so the
+					// last file was taken as the folder.
+					var notFound folderNotFoundError
+					if _, statErr := os.Stat(dest); statErr == nil && errors.As(err, &notFound) {
+						return fmt.Errorf("%w\n\nThe last argument is the folder to upload into, but %q is also a local path. Add the destination folder at the end, or \"/\" to create a new root folder.", err, dest)
+					}
 					return err
 				}
+				if !force {
+					var unverified []skippedFile
+					view.Skipped, unverified, err = findDuplicates(cmd.Context(), client, view.FolderID, sources, isDir, sizes)
+					if err != nil {
+						return err
+					}
+					declined, err := askUnverified(cmd, unverified)
+					if err != nil {
+						return err
+					}
+					view.Skipped = append(view.Skipped, declined...)
+				}
 			} else {
-				single = len(args) == 1 && isDir[0]
+				single = len(sources) == 1 && isDir[0]
 				if name == "" {
-					name = defaultUploadFolderName(args, isDir, time.Now())
+					name = defaultUploadFolderName(sources, isDir, time.Now())
 				}
 				created, _, err := client.Folders().CreateRootFolder(cmd.Context(), name)
 				if err != nil {
@@ -99,10 +153,17 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 
 			upload := func() error {
 				if single {
-					view.Uploads, err = up.uploadDirContents(cmd.Context(), args[0], view.FolderID, 0)
+					view.Uploads, err = up.uploadDirContents(cmd.Context(), sources[0], view.FolderID, 0)
 					return err
 				}
-				for i, p := range args {
+				skipped := map[string]bool{}
+				for _, s := range view.Skipped {
+					skipped[s.Path] = true
+				}
+				for i, p := range sources {
+					if skipped[p] {
+						continue
+					}
 					var uploads []uploadedFile
 					if isDir[i] {
 						uploads, err = up.uploadDir(cmd.Context(), p, view.FolderID)
@@ -130,11 +191,11 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&folder, "folder", "", "ID or path of an existing folder to upload into (default: create a new root folder)")
-	cmd.Flags().StringVar(&name, "name", "", "Name of the new root folder")
+	cmd.Flags().StringVar(&name, "name", "", `Name of the new root folder (only with no FOLDER, or FOLDER "/")`)
+	cmd.Flags().BoolVar(&force, "force", false, "Upload files even if FOLDER already holds the same file")
 	cmd.Flags().IntVarP(&maxDepth, "depth", "d", 3, "Maximum subfolder depth to upload")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 4*1024*1024, "Chunk size in bytes")
-	cmd.MarkFlagsMutuallyExclusive("folder", "name")
+	removedFlag(cmd, "folder", "openrelik upload <PATH>... <FOLDER>")
 	return cmd
 }
 
@@ -154,6 +215,118 @@ func localDirName(path string) string {
 		path = abs
 	}
 	return filepath.Base(path)
+}
+
+// skippedFile is a file 'upload' left out because the destination folder
+// already holds it.
+type skippedFile struct {
+	Path     string `json:"path"`
+	FileID   int    `json:"file_id"`
+	FolderID int    `json:"folder_id"`
+	Reason   string `json:"reason"`
+}
+
+// findDuplicates returns the files among sources that folderID already
+// holds. Only files with the same name and size are compared, so other
+// files cost nothing beyond one listing of the folder. Files with the same
+// SHA256 are returned as duplicates. Files the server has no hash for are
+// returned as unverified instead: hashing is skipped for very large files
+// and runs in the background, so the same name and size is all there is to
+// go on, and memory images of the same machine often share both.
+func findDuplicates(ctx context.Context, client *openrelik.Client, folderID int, sources []string, isDir []bool, sizes []int64) (duplicates, unverified []skippedFile, err error) {
+	if !slices.Contains(isDir, false) {
+		return nil, nil, nil // only directories, which go into new subfolders
+	}
+	existing, _, err := client.Folders().ListFiles(ctx, folderID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for i, p := range sources {
+		if isDir[i] {
+			continue
+		}
+		var localHash string
+		var unhashed *skippedFile
+		for _, f := range existing {
+			if f.DisplayName != filepath.Base(p) || f.Filesize != sizes[i] {
+				continue
+			}
+			info, _, err := client.Files().Info(ctx, f.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if info.HashSHA256 == "" {
+				if unhashed == nil {
+					unhashed = &skippedFile{Path: p, FileID: f.ID, FolderID: folderID,
+						Reason: "same name and size; the server has no hash to compare"}
+				}
+				continue
+			}
+			if localHash == "" {
+				if localHash, err = fileSHA256(p); err != nil {
+					return nil, nil, err
+				}
+			}
+			if strings.EqualFold(localHash, info.HashSHA256) {
+				duplicates = append(duplicates, skippedFile{Path: p, FileID: f.ID, FolderID: folderID, Reason: "same name and SHA256"})
+				unhashed = nil
+				break
+			}
+		}
+		if unhashed != nil {
+			unverified = append(unverified, *unhashed)
+		}
+	}
+	return duplicates, unverified, nil
+}
+
+// askUnverified asks whether to upload each file that may already be in
+// the destination folder, and returns the ones to skip. Without a terminal
+// to ask on, it fails instead, so a script never skips a file silently.
+func askUnverified(cmd *cobra.Command, unverified []skippedFile) ([]skippedFile, error) {
+	if len(unverified) == 0 {
+		return nil, nil
+	}
+	describe := func(s skippedFile) string {
+		return fmt.Sprintf("%q may already be in folder %d as file %d: it has the same name and size, but the server has no hash to compare.",
+			filepath.Base(s.Path), s.FolderID, s.FileID)
+	}
+
+	if !stdinIsTerminal(cmd.InOrStdin()) {
+		var b strings.Builder
+		for _, s := range unverified {
+			b.WriteString(describe(s) + "\n")
+		}
+		b.WriteString("\nUse --force to upload anyway, or leave these files out.")
+		return nil, errors.New(b.String())
+	}
+
+	var skip []skippedFile
+	for _, s := range unverified {
+		upload, err := util.Confirm(cmd.ErrOrStderr(), cmd.InOrStdin(), describe(s)+" Upload anyway?")
+		if err != nil {
+			return nil, err
+		}
+		if !upload {
+			skip = append(skip, s)
+		}
+	}
+	return skip, nil
+}
+
+// fileSHA256 returns the hex SHA256 of the file at path.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // uploadedFile is a file uploaded by 'upload' and the folder it went to.
@@ -218,16 +391,22 @@ func (u *uploader) uploadDirContents(ctx context.Context, localPath string, remo
 }
 
 func newDownloadCmd() *cobra.Command {
-	var fileID int
-
 	cmd := &cobra.Command{
-		Use:   "download [DESTINATION]",
+		Use:   "download <FILE> [DESTINATION]",
 		Short: "Download a file",
 		Long: `Download a file from OpenRelik to the local filesystem.
 
---file is the integer file ID, as shown by 'folder list'. DESTINATION may
-be a file path or an existing directory; if a directory is given, the
-original filename is used inside it.
+FILE is either a file ID, as shown by 'folder list <FOLDER>', or a path
+of folder names ending in the file name, such as 'Case A/evidence/notes.txt'.
+If more than one file matches a path, the matches are listed so you can
+pick one by ID.
+
+Every part of a path is a name, starting at the root folders, so
+'42/notes.txt' looks in a root folder named "42", not in folder 42; use
+the file ID instead.
+
+DESTINATION may be a file path or an existing directory; if a directory is
+given, the original filename is used inside it.
 If DESTINATION is omitted, the file is saved to the current directory using
 its original filename. You will be prompted before overwriting an existing file.
 
@@ -235,21 +414,38 @@ The original filename never places the file outside the current or given
 directory: any directories in it are dropped, and existing symlinks are not
 followed. If the name can't be used, give DESTINATION as a file path.`,
 		Example: `  # Download to current directory (original filename)
-  openrelik download --file 123
+  openrelik download 123
+
+  # Download a file by its path
+  openrelik download "Case A/evidence/disk.E01"
 
   # Download to a specific path
-  openrelik download --file 123 ./output/report.pdf
+  openrelik download 123 ./output/report.pdf
 
   # Download into a directory (uses original filename)
-  openrelik download --file 123 ./output/`,
-		Args: util.UseArgs(),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if fileID <= 0 {
-				return fmt.Errorf("invalid file ID: %d", fileID)
+  openrelik download 123 ./output/`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			// FILE is the argument most likely to hold spaces, so don't
+			// suggest quoting only DESTINATION as UseArgsWithQuoteHint would.
+			err := util.UseArgs()(cmd, args)
+			if err != nil && len(args) > 2 {
+				return fmt.Errorf("%w, got %d\nQuote FILE and DESTINATION if they contain spaces.", err, len(args))
 			}
-
+			return err
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := newClient()
 			if err != nil {
+				return err
+			}
+
+			fileID, err := resolveFile(cmd.Context(), client, args[0])
+			if err != nil {
+				// An unquoted path such as Case A/notes.txt splits into
+				// FILE "Case" and DESTINATION "A/notes.txt".
+				if len(args) > 1 && !strings.Contains(args[0], "/") && !folderIDPattern.MatchString(args[0]) {
+					return fmt.Errorf("%w\nQuote FILE if it contains spaces: %q", err, strings.Join(args, " "))
+				}
 				return err
 			}
 
@@ -264,8 +460,8 @@ followed. If the name can't be used, give DESTINATION as a file path.`,
 			// current or given directory.
 			var destPath string
 			nameFromServer := true
-			if len(args) > 0 {
-				destPath = args[0]
+			if len(args) > 1 {
+				destPath = args[1]
 				info, err := os.Stat(destPath)
 				nameFromServer = err == nil && info.IsDir()
 			}
@@ -333,8 +529,7 @@ followed. If the name can't be used, give DESTINATION as a file path.`,
 		},
 	}
 
-	cmd.Flags().IntVar(&fileID, "file", 0, "ID of the file to download")
-	cmd.MarkFlagRequired("file")
+	removedFlag(cmd, "file", "openrelik download <FILE> [DESTINATION]")
 	return cmd
 }
 

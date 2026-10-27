@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -348,6 +350,24 @@ func FormatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f%cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// ParseBytes parses a byte count such as "512", "4K", "10MB" or "1g". As
+// with 'head -c' and FormatBytes, the K, M, G, T, P and E suffixes are
+// powers of 1024.
+func ParseBytes(s string) (int64, error) {
+	const units = "KMGTPE" // as in FormatBytes
+	num := strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(s)), "B")
+	mult := int64(1)
+	if i := strings.IndexAny(num, units); i >= 0 && i == len(num)-1 {
+		mult = int64(1) << (10 * (1 + strings.IndexByte(units, num[i])))
+		num = num[:i]
+	}
+	n, err := strconv.ParseInt(num, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("invalid byte count %q (use a number such as 512, 4K, 10M, 1G or 2T)", s)
+	}
+	return n * mult, nil
 }
 
 // FormatTimeAgo formats a time.Time into a relative string like "about 15 days ago".

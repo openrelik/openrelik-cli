@@ -2,8 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,11 +28,14 @@ type uploadServer struct {
 	roots      []string          // names of created root folders
 	subfolders []string          // "parentID/name" of created subfolders
 	uploads    map[string]string // filename -> folder_id
+	files      map[string]string // folder ID -> JSON list of its files
+	info       map[string]string // file ID -> JSON file info
+	listings   int               // requests for folder file listings
 }
 
 func newUploadServer(t *testing.T) *uploadServer {
 	t.Helper()
-	s := &uploadServer{nextID: 500, uploads: map[string]string{}}
+	s := &uploadServer{nextID: 500, uploads: map[string]string{}, files: map[string]string{}, info: map[string]string{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -54,7 +60,20 @@ func newUploadServer(t *testing.T) *uploadServer {
 			case "/api/v1/folders/43/folders/":
 				fmt.Fprint(w, `[]`)
 			default:
-				w.WriteHeader(http.StatusNotFound)
+				parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+				switch {
+				case len(parts) == 5 && parts[2] == "folders" && parts[4] == "files":
+					s.listings++
+					if files, ok := s.files[parts[3]]; ok {
+						fmt.Fprint(w, files)
+					} else {
+						fmt.Fprint(w, `[]`)
+					}
+				case len(parts) == 4 && parts[2] == "files" && s.info[parts[3]] != "":
+					fmt.Fprint(w, s.info[parts[3]])
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
 			}
 			return
 		}
@@ -110,6 +129,13 @@ func writeTree(t *testing.T, dirName string, files ...string) string {
 
 func runUpload(t *testing.T, server *uploadServer, args ...string) (string, error) {
 	t.Helper()
+	return runUploadWithInput(t, server, "", args...)
+}
+
+// runUploadWithInput runs 'upload' with input on stdin, for answering
+// prompts.
+func runUploadWithInput(t *testing.T, server *uploadServer, input string, args ...string) (string, error) {
+	t.Helper()
 	t.Setenv("OPENRELIK_API_KEY", "test-key")
 	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
 
@@ -117,6 +143,7 @@ func runUpload(t *testing.T, server *uploadServer, args ...string) (string, erro
 	stdout := new(bytes.Buffer)
 	root.SetOut(stdout)
 	root.SetErr(new(bytes.Buffer))
+	root.SetIn(strings.NewReader(input))
 	root.SetArgs(append([]string{"upload"}, args...))
 	err := root.Execute()
 	return stdout.String(), err
@@ -137,23 +164,36 @@ func TestUpload(t *testing.T) {
 	}{
 		{
 			name:        "file into existing folder",
-			args:        []string{a, "--folder", "42"},
+			args:        []string{a, "42"},
 			wantUploads: map[string]string{"a.txt": "42"},
 			wantOutput:  []string{`File "a.txt" uploaded to folder 42 (ID 900)`},
 		},
 		{
 			name:        "files into new timestamped root folder",
-			args:        []string{a, b},
+			args:        []string{a, b, "/"},
 			wantRoots:   []string{"Upload *"},
 			wantUploads: map[string]string{"a.txt": "501", "b.txt": "501"},
 			wantOutput:  []string{`(ID 501)`, `File "b.txt" uploaded to folder 501`},
 		},
 		{
-			name:        "files into new named root folder",
+			name:        "file into new named root folder",
 			args:        []string{a, "--name", "Case 7"},
 			wantRoots:   []string{"Case 7"},
 			wantUploads: map[string]string{"a.txt": "501"},
 			wantOutput:  []string{`Folder "Case 7" created (ID 501)`},
+		},
+		{
+			name:        "files into new named root folder",
+			args:        []string{a, b, "/", "--name", "Case 7"},
+			wantRoots:   []string{"Case 7"},
+			wantUploads: map[string]string{"a.txt": "501", "b.txt": "501"},
+			wantOutput:  []string{`Folder "Case 7" created (ID 501)`},
+		},
+		{
+			name:        "file into new root folder with slash",
+			args:        []string{a, "/"},
+			wantRoots:   []string{"Upload *"},
+			wantUploads: map[string]string{"a.txt": "501"},
 		},
 		{
 			name:           "single directory becomes the root folder",
@@ -163,14 +203,21 @@ func TestUpload(t *testing.T) {
 			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502", "auth.log": "503"},
 		},
 		{
-			name:        "file into folder given by path",
-			args:        []string{a, "--folder", "Case A/evidence/"},
-			wantUploads: map[string]string{"a.txt": "43"},
+			name:           "directory with slash becomes the root folder",
+			args:           []string{evidence, "/"},
+			wantRoots:      []string{"evidence"},
+			wantSubfolders: []string{"501/logs", "502/deep"},
+			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502", "auth.log": "503"},
+		},
+		{
+			name:        "files into folder given by path",
+			args:        []string{a, b, "Case A/evidence/"},
+			wantUploads: map[string]string{"a.txt": "43", "b.txt": "43"},
 			wantOutput:  []string{`File "a.txt" uploaded to folder 43`},
 		},
 		{
 			name:           "directory into existing folder is created inside it",
-			args:           []string{evidence, "--folder", "42"},
+			args:           []string{evidence, "42"},
 			wantSubfolders: []string{"42/evidence", "501/logs", "502/deep"},
 			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502", "auth.log": "503"},
 		},
@@ -183,7 +230,7 @@ func TestUpload(t *testing.T) {
 		},
 		{
 			name:           "mixed files and directories into new root folder",
-			args:           []string{a, evidence},
+			args:           []string{a, evidence, "/"},
 			wantRoots:      []string{"Upload *"},
 			wantSubfolders: []string{"501/evidence", "502/logs", "503/deep"},
 			wantUploads:    map[string]string{"a.txt": "501", "disk.E01": "502", "syslog": "503", "auth.log": "504"},
@@ -234,18 +281,22 @@ func TestUpload(t *testing.T) {
 }
 
 func TestUploadErrors(t *testing.T) {
-	loose := writeTree(t, "loose", "a.txt")
-	a := filepath.Join(loose, "a.txt")
+	loose := writeTree(t, "loose", "a.txt", "b.txt")
+	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
 
 	tests := []struct {
 		name    string
 		args    []string
 		wantErr string
 	}{
-		{name: "missing path creates nothing", args: []string{a, filepath.Join(loose, "missing")}, wantErr: "no such file"},
-		{name: "folder and name conflict", args: []string{a, "--folder", "42", "--name", "x"}, wantErr: "none of the others can be"},
-		{name: "invalid folder ID", args: []string{a, "--folder", "0"}, wantErr: "invalid folder ID"},
-		{name: "unknown folder path", args: []string{a, "--folder", "Case A/nope/"}, wantErr: `no folder named "nope" in /Case A/`},
+		{name: "missing path creates nothing", args: []string{a, filepath.Join(loose, "missing"), "/"}, wantErr: "no such file"},
+		{name: "name with existing folder", args: []string{a, "42", "--name", "x"}, wantErr: "--name only applies when creating a new root folder"},
+		{name: "invalid folder ID", args: []string{a, "0"}, wantErr: "invalid folder ID"},
+		{name: "unknown folder path", args: []string{a, "Case A/nope/"}, wantErr: `no folder named "nope" in /Case A/`},
+		{name: "forgotten destination", args: []string{a, b}, wantErr: "is also a local path. Add the destination folder at the end"},
+		{name: "filesystem root", args: []string{"/"}, wantErr: `refusing to upload the filesystem root "/"`},
+		{name: "old --folder flag points to FOLDER", args: []string{a, "--folder", "42"}, wantErr: "'openrelik upload --folder' was removed. Use instead:\n\n  openrelik upload <PATH>... <FOLDER>"},
+		{name: "old --folder= flag points to FOLDER", args: []string{a, "--folder=Case A/"}, wantErr: "'openrelik upload --folder' was removed"},
 		{name: "no paths", args: []string{}, wantErr: "PATH"},
 		{name: "negative depth", args: []string{a, "--depth", "-1"}, wantErr: "invalid depth: -1"},
 		{name: "zero chunk size", args: []string{a, "--chunk-size", "0"}, wantErr: "invalid chunk size: 0"},
@@ -267,12 +318,309 @@ func TestUploadErrors(t *testing.T) {
 	}
 }
 
+func TestUploadSkipsDuplicates(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt", "b.txt")
+	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
+	content := "content of a.txt"
+	sum := sha256.Sum256([]byte(content))
+	hash := hex.EncodeToString(sum[:])
+
+	existing := func(name string, size int) string {
+		return fmt.Sprintf(`[{"id": 77, "display_name": %q, "filesize": %d}]`, name, size)
+	}
+	tests := []struct {
+		name        string
+		args        []string
+		files       string // JSON listing of folder 42
+		hash        string // SHA256 of file 77 on the server
+		wantUploads map[string]string
+		wantOutput  []string
+		wantSkipped bool
+	}{
+		{
+			name:        "same name and SHA256 is skipped",
+			args:        []string{a, b, "42"},
+			files:       existing("a.txt", len(content)),
+			hash:        hash,
+			wantUploads: map[string]string{"b.txt": "42"},
+			wantOutput:  []string{`Skipped "a.txt": already in folder 42 as file 77 (same name and SHA256)`},
+			wantSkipped: true,
+		},
+		{
+			name:        "hash is compared case-insensitively",
+			args:        []string{a, "42"},
+			files:       existing("a.txt", len(content)),
+			hash:        strings.ToUpper(hash),
+			wantUploads: map[string]string{},
+			wantSkipped: true,
+		},
+		{
+			name:        "different content is uploaded",
+			args:        []string{a, "42"},
+			files:       existing("a.txt", len(content)),
+			hash:        strings.Repeat("0", 64),
+			wantUploads: map[string]string{"a.txt": "42"},
+		},
+		{
+			name:        "different size is uploaded",
+			args:        []string{a, "42"},
+			files:       existing("a.txt", len(content)+1),
+			wantUploads: map[string]string{"a.txt": "42"},
+		},
+		{
+			name:        "different name is uploaded",
+			args:        []string{a, "42"},
+			files:       existing("other.txt", len(content)),
+			wantUploads: map[string]string{"a.txt": "42"},
+		},
+		{
+			name:        "force uploads anyway",
+			args:        []string{a, "42", "--force"},
+			files:       existing("a.txt", len(content)),
+			hash:        hash,
+			wantUploads: map[string]string{"a.txt": "42"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			server.files["42"] = tt.files
+			server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, tt.hash)
+
+			out, err := runUpload(t, server, tt.args...)
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if fmt.Sprint(server.uploads) != fmt.Sprint(tt.wantUploads) {
+				t.Errorf("uploaded %v, want %v", server.uploads, tt.wantUploads)
+			}
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(out, want) {
+					t.Errorf("expected output to contain %q\n%s", want, out)
+				}
+			}
+			if got := strings.Contains(out, "Skipped"); got != tt.wantSkipped {
+				t.Errorf("skipped = %v, want %v\n%s", got, tt.wantSkipped, out)
+			}
+		})
+	}
+}
+
+func TestUploadUnverifiedDuplicates(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt", "b.txt")
+	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
+
+	tests := []struct {
+		name        string
+		terminal    bool
+		input       string
+		wantErr     string
+		wantUploads map[string]string
+		wantOutput  string
+	}{
+		{
+			name:        "fails without a terminal",
+			wantErr:     "\"a.txt\" may already be in folder 42 as file 77: it has the same name and size, but the server has no hash to compare.\n\nUse --force",
+			wantUploads: map[string]string{},
+		},
+		{
+			name:        "uploads when confirmed",
+			terminal:    true,
+			input:       "y\n",
+			wantUploads: map[string]string{"a.txt": "42", "b.txt": "42"},
+		},
+		{
+			name:        "skips when declined",
+			terminal:    true,
+			input:       "n\n",
+			wantUploads: map[string]string{"b.txt": "42"},
+			wantOutput:  `Skipped "a.txt": already in folder 42 as file 77 (same name and size; the server has no hash to compare)`,
+		},
+		{
+			name:        "skips at end of input",
+			terminal:    true,
+			wantUploads: map[string]string{"b.txt": "42"},
+			wantOutput:  `Skipped "a.txt"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := stdinIsTerminal
+			stdinIsTerminal = func(io.Reader) bool { return tt.terminal }
+			t.Cleanup(func() { stdinIsTerminal = orig })
+
+			server := newUploadServer(t)
+			defer server.Close()
+			server.files["42"] = fmt.Sprintf(`[{"id": 77, "display_name": "a.txt", "filesize": %d}]`, len("content of a.txt"))
+			server.info["77"] = `{"id": 77, "display_name": "a.txt"}`
+
+			out, err := runUploadWithInput(t, server, tt.input, a, b, "42")
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if fmt.Sprint(server.uploads) != fmt.Sprint(tt.wantUploads) {
+				t.Errorf("uploaded %v, want %v", server.uploads, tt.wantUploads)
+			}
+			if !strings.Contains(out, tt.wantOutput) {
+				t.Errorf("expected output to contain %q\n%s", tt.wantOutput, out)
+			}
+		})
+	}
+}
+
+func TestUploadPrefersHashMatchOverUnhashed(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt")
+	content := "content of a.txt"
+	sum := sha256.Sum256([]byte(content))
+
+	server := newUploadServer(t)
+	defer server.Close()
+	server.files["42"] = fmt.Sprintf(`[{"id": 76, "display_name": "a.txt", "filesize": %d}, {"id": 77, "display_name": "a.txt", "filesize": %d}]`,
+		len(content), len(content))
+	server.info["76"] = `{"id": 76, "display_name": "a.txt"}`
+	server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
+
+	// No terminal, so asking about file 76 would fail.
+	out, err := runUpload(t, server, filepath.Join(loose, "a.txt"), "42")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if want := `Skipped "a.txt": already in folder 42 as file 77 (same name and SHA256)`; !strings.Contains(out, want) {
+		t.Errorf("expected output to contain %q\n%s", want, out)
+	}
+}
+
+func TestUploadForgottenDestinationHint(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "Dup", "missing"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(dir)
+
+	for _, tt := range []struct {
+		name     string
+		dest     string
+		wantHint bool
+	}{
+		{name: "no such folder", dest: "missing", wantHint: true},
+		{name: "ambiguous folder", dest: "Dup"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			_, err := runUpload(t, server, "a.txt", tt.dest)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := strings.Contains(err.Error(), "is also a local path"); got != tt.wantHint {
+				t.Errorf("hint = %v, want %v: %v", got, tt.wantHint, err)
+			}
+		})
+	}
+}
+
+func TestUploadDuplicateCheckScope(t *testing.T) {
+	evidence := writeTree(t, "evidence", "disk.E01")
+	loose := writeTree(t, "loose", "a.txt")
+	a := filepath.Join(loose, "a.txt")
+
+	for _, tt := range []struct {
+		name         string
+		args         []string
+		wantListings int
+	}{
+		{name: "new root folder", args: []string{a, "/"}},
+		{name: "single argument", args: []string{a}},
+		{name: "only directories", args: []string{evidence, "42"}},
+		{name: "files into existing folder", args: []string{a, "42"}, wantListings: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			if _, err := runUpload(t, server, tt.args...); err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if server.listings != tt.wantListings {
+				t.Errorf("listed folder files %d times, want %d", server.listings, tt.wantListings)
+			}
+		})
+	}
+}
+
+func TestUploadJSONIncludesSkipped(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt")
+	server := newUploadServer(t)
+	defer server.Close()
+	sum := sha256.Sum256([]byte("content of a.txt"))
+	server.files["42"] = `[{"id": 77, "display_name": "a.txt", "filesize": 16}]`
+	server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
+
+	out, err := runUpload(t, server, filepath.Join(loose, "a.txt"), "42", "--format", "json")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	var got struct {
+		Uploads []any         `json:"uploads"`
+		Skipped []skippedFile `json:"skipped"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(got.Uploads) != 0 || len(got.Skipped) != 1 || got.Skipped[0].FileID != 77 || got.Skipped[0].FolderID != 42 ||
+		!strings.HasSuffix(got.Skipped[0].Path, "a.txt") || got.Skipped[0].Reason == "" {
+		t.Errorf("unexpected JSON: %s", out)
+	}
+}
+
+func TestUploadVerboseSkipped(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt", "b.txt")
+	sum := sha256.Sum256([]byte("content of a.txt"))
+	tests := []struct {
+		name      string
+		args      []string
+		wantStart string
+	}{
+		{name: "all skipped", args: []string{"a.txt"}, wantStart: `Skipped "a.txt"`},
+		{name: "some skipped", args: []string{"a.txt", "b.txt"}, wantStart: "ID"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			server.files["42"] = `[{"id": 77, "display_name": "a.txt", "filesize": 16}]`
+			server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
+
+			var args []string
+			for _, a := range tt.args {
+				args = append(args, filepath.Join(loose, a))
+			}
+			out, err := runUpload(t, server, append(args, "42", "--format", "verbose")...)
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if !strings.HasPrefix(out, tt.wantStart) {
+				t.Errorf("expected output to start with %q\n%q", tt.wantStart, out)
+			}
+			if !strings.Contains(out, `Skipped "a.txt"`) {
+				t.Errorf("expected a.txt to be reported as skipped\n%s", out)
+			}
+		})
+	}
+}
+
 func TestUploadPartialFailureNamesCreatedFolder(t *testing.T) {
 	loose := writeTree(t, "loose", "a.txt", "fail.txt")
 	server := newUploadServer(t)
 	defer server.Close()
 
-	_, err := runUpload(t, server, filepath.Join(loose, "a.txt"), filepath.Join(loose, "fail.txt"), "--name", "Case")
+	_, err := runUpload(t, server, filepath.Join(loose, "a.txt"), filepath.Join(loose, "fail.txt"), "/", "--name", "Case")
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -289,7 +637,7 @@ func TestUploadDotUsesDirectoryName(t *testing.T) {
 	evidence := writeTree(t, "evidence", "disk.E01")
 	t.Chdir(evidence)
 
-	for _, args := range [][]string{{"."}, {".", "--folder", "42"}} {
+	for _, args := range [][]string{{"."}, {".", "42"}} {
 		server := newUploadServer(t)
 		if _, err := runUpload(t, server, args...); err != nil {
 			t.Fatalf("%v: Execute() failed: %v", args, err)
@@ -393,7 +741,7 @@ func TestDownloadCmd(t *testing.T) {
 		root := NewRootCmd()
 		buf := new(bytes.Buffer)
 		root.SetOut(buf)
-		root.SetArgs([]string{"download", "--file", "789"})
+		root.SetArgs([]string{"download", "789"})
 
 		if err := root.Execute(); err != nil {
 			t.Fatalf("Execute() failed: %v", err)
@@ -415,7 +763,7 @@ func TestDownloadCmd(t *testing.T) {
 		root := NewRootCmd()
 		buf := new(bytes.Buffer)
 		root.SetOut(buf)
-		root.SetArgs([]string{"download", "--file", "789", tmpDir})
+		root.SetArgs([]string{"download", "789", tmpDir})
 
 		if err := root.Execute(); err != nil {
 			t.Fatalf("Execute() failed: %v", err)
@@ -435,7 +783,7 @@ func TestDownloadCmd(t *testing.T) {
 		root := NewRootCmd()
 		buf := new(bytes.Buffer)
 		root.SetOut(buf)
-		root.SetArgs([]string{"download", "--file", "789", customPath})
+		root.SetArgs([]string{"download", "789", customPath})
 
 		if err := root.Execute(); err != nil {
 			t.Fatalf("Execute() failed: %v", err)
@@ -452,7 +800,7 @@ func TestDownloadCmd(t *testing.T) {
 		buf := new(bytes.Buffer)
 		root.SetOut(buf)
 		root.SetErr(buf)
-		root.SetArgs([]string{"download", "--file", "789", "/non/existent/path/file.txt"})
+		root.SetArgs([]string{"download", "789", "/non/existent/path/file.txt"})
 
 		err := root.Execute()
 		if err == nil {
@@ -474,7 +822,7 @@ func TestDownloadCmd(t *testing.T) {
 		root.SetOut(buf)
 		// Mock "y" input
 		root.SetIn(strings.NewReader("y\n"))
-		root.SetArgs([]string{"download", "--file", "789", tmpFile.Name()})
+		root.SetArgs([]string{"download", "789", tmpFile.Name()})
 
 		if err := root.Execute(); err != nil {
 			t.Fatalf("Execute() failed: %v", err)
@@ -498,7 +846,7 @@ func TestDownloadCmd(t *testing.T) {
 		root.SetErr(buf)
 		// Mock empty input (just newline)
 		root.SetIn(strings.NewReader("\n"))
-		root.SetArgs([]string{"download", "--file", "789", tmpFile.Name()})
+		root.SetArgs([]string{"download", "789", tmpFile.Name()})
 
 		err := root.Execute()
 		if err == nil {
@@ -526,11 +874,13 @@ func TestDownloadArgErrors(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{name: "missing --file", args: []string{"download"}, wantErr: `required flag(s) "file" not set`},
-		{name: "zero file ID", args: []string{"download", "--file", "0"}, wantErr: "invalid file ID: 0"},
-		{name: "non-numeric file ID", args: []string{"download", "--file", "abc"}, wantErr: `invalid argument "abc"`},
-		{name: "two destinations", args: []string{"download", "--file", "1", "a", "b"}, wantErr: "too many arguments"},
-		{name: "old file download points to download", args: []string{"file", "download", "1"}, wantErr: "openrelik download --file <ID>"},
+		{name: "missing file", args: []string{"download"}, wantErr: "missing required argument: FILE"},
+		{name: "zero file ID", args: []string{"download", "0"}, wantErr: "invalid file ID: 0"},
+		{name: "name without folder", args: []string{"download", "abc"}, wantErr: `invalid file "abc"`},
+		{name: "two destinations", args: []string{"download", "1", "a", "b"}, wantErr: "too many arguments: expected at most 2, got 3\nQuote FILE and DESTINATION if they contain spaces."},
+		{name: "unquoted path", args: []string{"download", "Case", "A/notes.txt"}, wantErr: `Quote FILE if it contains spaces: "Case A/notes.txt"`},
+		{name: "old --file flag points to FILE", args: []string{"download", "--file", "1"}, wantErr: "'openrelik download --file' was removed. Use instead:\n\n  openrelik download <FILE> [DESTINATION]"},
+		{name: "old file download points to download", args: []string{"file", "download", "1"}, wantErr: "openrelik download <FILE> [DESTINATION]"},
 		{name: "old folder upload is gone", args: []string{"folder", "upload", "x"}, wantErr: `unknown command "upload" for "openrelik folder"`},
 	}
 	for _, tt := range tests {
@@ -656,7 +1006,7 @@ func TestDownloadStaysInDirectory(t *testing.T) {
 			root.SetOut(new(bytes.Buffer))
 			root.SetErr(new(bytes.Buffer))
 			root.SetIn(strings.NewReader("y\n"))
-			root.SetArgs(append([]string{"download", "--file", "789", "-q"}, tt.args...))
+			root.SetArgs(append([]string{"download", "789", "-q"}, tt.args...))
 			err := root.Execute()
 
 			if after, _ := os.ReadFile(outside); string(after) != string(before) {
@@ -673,6 +1023,60 @@ func TestDownloadStaysInDirectory(t *testing.T) {
 			}
 			if got, _ := os.ReadFile(tt.wantFile); string(got) != "PWNED\n" {
 				t.Errorf("expected the download in %s, got %q", tt.wantFile, got)
+			}
+		})
+	}
+}
+
+func TestUploadRepeatedPathOnce(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt")
+	a := filepath.Join(loose, "a.txt")
+	// The same file under another spelling of its path.
+	other := filepath.Join(loose, ".", "a.txt")
+	content := "content of a.txt"
+	sum := sha256.Sum256([]byte(content))
+
+	tests := []struct {
+		name     string
+		args     []string
+		files    string // JSON listing of folder 42
+		wantLine string
+	}{
+		{
+			name:     "new file is uploaded once",
+			args:     []string{a, other, "42"},
+			wantLine: `File "a.txt" uploaded`,
+		},
+		{
+			name:     "existing file is skipped once",
+			args:     []string{a, a, "42"},
+			files:    fmt.Sprintf(`[{"id": 77, "display_name": "a.txt", "filesize": %d}]`, len(content)),
+			wantLine: `Skipped "a.txt"`,
+		},
+		{
+			name:     "directory is uploaded once",
+			args:     []string{loose, loose + "/", "42"},
+			wantLine: `File "a.txt" uploaded`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			if tt.files != "" {
+				server.files["42"] = tt.files
+			}
+			server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
+
+			out, err := runUpload(t, server, tt.args...)
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if n := strings.Count(out, tt.wantLine); n != 1 {
+				t.Errorf("expected %q once, got %d times\n%s", tt.wantLine, n, out)
+			}
+			if len(server.subfolders) > 1 {
+				t.Errorf("created subfolders %q, want at most one", server.subfolders)
 			}
 		})
 	}

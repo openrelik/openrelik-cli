@@ -119,6 +119,42 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
+func TestParseBytes(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    int64
+		wantErr bool
+	}{
+		{input: "0", want: 0},
+		{input: "512", want: 512},
+		{input: "4K", want: 4 * 1024},
+		{input: "4kb", want: 4 * 1024},
+		{input: "10M", want: 10 * 1024 * 1024},
+		{input: "1G", want: 1024 * 1024 * 1024},
+		{input: "1.5M", wantErr: true},
+		{input: "-1", wantErr: true},
+		{input: "K", wantErr: true},
+		{input: "10T", want: 10 << 40},
+		{input: "1p", want: 1 << 50},
+		{input: "7E", want: 7 << 60},
+		{input: "8E", wantErr: true},
+		{input: "1X", wantErr: true},
+		{input: "", wantErr: true},
+		{input: "9999999999999G", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		got, err := ParseBytes(tt.input)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("ParseBytes(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ParseBytes(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestFormatTimeAgo(t *testing.T) {
 	now := time.Now()
 	tests := []struct {

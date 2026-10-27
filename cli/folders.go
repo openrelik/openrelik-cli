@@ -275,7 +275,7 @@ func ambiguousFolderError(path string, matches []folderMatch) error {
 	fmt.Fprintln(tw, "ID\tLOCATION\tOWNER\tUPDATED")
 	for _, m := range matches {
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", m.folder.ID, m.location(),
-			m.folder.User.Username, util.FormatTimeAgo(m.folder.UpdatedAt))
+			m.folder.User.Username, util.FormatTime(m.folder.UpdatedAt))
 	}
 	tw.Flush()
 	b.WriteString("\nUse one of the IDs above instead of the path.")
@@ -482,7 +482,7 @@ func existingFoldersError(e *util.MultipleFoldersError) error {
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tOWNER\tUPDATED")
 	for _, f := range e.Matches {
-		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.User.Username, util.FormatTimeAgo(f.UpdatedAt))
+		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.User.Username, util.FormatTime(f.UpdatedAt))
 	}
 	tw.Flush()
 	b.WriteString("\nUse one of the IDs above, or add --latest to use the most recently updated.")

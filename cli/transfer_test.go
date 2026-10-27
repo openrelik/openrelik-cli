@@ -279,7 +279,7 @@ func TestUpload(t *testing.T) {
 			for i, want := range tt.wantRoots {
 				got := server.roots[i]
 				if want == "Upload *" {
-					if _, err := time.Parse("Upload 2006-01-02 15:04", got); err != nil {
+					if _, err := time.Parse("Upload 2006-01-02 15:04 UTC", got); err != nil {
 						t.Errorf("root folder %q is not a timestamp name: %v", got, err)
 					}
 				} else if got != want {
@@ -712,7 +712,8 @@ func TestUploadJSON(t *testing.T) {
 }
 
 func TestDefaultUploadFolderName(t *testing.T) {
-	now := time.Date(2026, 10, 27, 14, 5, 0, 0, time.UTC)
+	// 15:05 in CET is 14:05 UTC.
+	now := time.Date(2026, 10, 27, 15, 5, 0, 0, time.FixedZone("CET", 3600))
 	tests := []struct {
 		paths []string
 		isDir []bool
@@ -720,8 +721,8 @@ func TestDefaultUploadFolderName(t *testing.T) {
 	}{
 		{[]string{"./evidence/"}, []bool{true}, "evidence"},
 		{[]string{"/cases/evidence/logs/.."}, []bool{true}, "evidence"},
-		{[]string{"/cases/disk.E01"}, []bool{false}, "Upload 2026-10-27 14:05"},
-		{[]string{"a", "b"}, []bool{true, true}, "Upload 2026-10-27 14:05"},
+		{[]string{"/cases/disk.E01"}, []bool{false}, "Upload 2026-10-27 14:05 UTC"},
+		{[]string{"a", "b"}, []bool{true, true}, "Upload 2026-10-27 14:05 UTC"},
 	}
 	for _, tt := range tests {
 		if got := defaultUploadFolderName(tt.paths, tt.isDir, now); got != tt.want {

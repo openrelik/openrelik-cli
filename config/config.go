@@ -94,6 +94,24 @@ func GetConfigDir() (string, error) {
 	return filepath.Join(home, configDir), nil
 }
 
+// SettingsPath returns the path of the settings file.
+func SettingsPath() (string, error) {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, settingsFile), nil
+}
+
+// CredentialsPath returns the path of the credentials file.
+func CredentialsPath() (string, error) {
+	dir, err := GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, credentialsFile), nil
+}
+
 func EnsureConfigDir() (string, error) {
 	dir, err := GetConfigDir()
 	if err != nil {

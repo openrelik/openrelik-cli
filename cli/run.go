@@ -170,6 +170,11 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 				return fmt.Errorf("invalid download policy: %s (must be 'all', 'final', or 'none')", downloadPolicy)
 			}
 
+			// Check the inputs before anything is created or previewed.
+			if err := util.CheckInputs(positionalArgs); err != nil {
+				return err
+			}
+
 			if dryRun {
 				if showProgress {
 					fmt.Fprintln(cmd.ErrOrStderr(), "Dry run: generating workflow spec...")

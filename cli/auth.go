@@ -11,6 +11,7 @@ import (
 
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
+	openrelik "github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -178,20 +179,49 @@ func newAuthSwitchCmd() *cobra.Command {
 func newAuthStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show the current active server",
+		Short: "Show the server in use and check the login",
+		Long: `Show the server and API key that commands use, where each comes from, and
+the user the API key logs in as.
+
+The server and API key are taken from the OPENRELIK_SERVER_URL and
+OPENRELIK_API_KEY environment variables if they are set, and otherwise from
+the active server chosen with 'auth login' or 'auth switch'. The API key
+itself is never shown.
+
+The login is checked with the server, and the command fails if no server or
+API key is set, or if the server doesn't accept the key.`,
+		Example: `  # Check which server commands use
+  openrelik auth status
+
+  # Check the login in a script
+  openrelik auth status -q || openrelik auth login`,
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			settings, err := config.LoadSettings()
-			if err != nil {
-				return fmt.Errorf("failed to load settings: %w", err)
+			c := resolveCredentials()
+			view := &AuthStatusView{credentials: c}
+			var checkErr error
+			switch {
+			case c.ServerURL == "":
+				checkErr = errors.New("no server is set; run 'openrelik auth login' or set OPENRELIK_SERVER_URL")
+			case c.APIKey == "":
+				checkErr = fmt.Errorf("no API key is set for %s; run 'openrelik auth login' or set OPENRELIK_API_KEY", c.ServerURL)
+			default:
+				var client *openrelik.Client
+				client, checkErr = NewAPIClient()
+				if checkErr == nil {
+					view.User, _, checkErr = client.Users().GetMe(cmd.Context())
+				}
+				if checkErr != nil {
+					checkErr = fmt.Errorf("the login to %s doesn't work: %w", c.ServerURL, checkErr)
+				}
 			}
-
-			active := settings.GetActiveServer()
-			if active == nil {
-				return fmt.Errorf("no active server configured")
+			if checkErr != nil {
+				view.Error = checkErr.Error()
 			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Active server: %s\n", active.URL)
-			return nil
+			if err := formatAndPrint(cmd, view); err != nil {
+				return err
+			}
+			return checkErr
 		},
 	}
 }

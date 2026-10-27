@@ -441,3 +441,43 @@ func TestLocalFileName(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyInput(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	for _, f := range []string{"4121", "evidence.bin"} {
+		os.WriteFile(f, []byte("x"), 0o644)
+	}
+	os.Mkdir("2024", 0o755)
+	os.Mkdir("logs", 0o755)
+
+	tests := []struct {
+		arg      string
+		wantID   int
+		wantPath string
+		wantErr  string
+	}{
+		{arg: "123", wantID: 123},
+		{arg: "evidence.bin", wantPath: "evidence.bin"},
+		{arg: "./4121", wantPath: "./4121"},
+		{arg: "4121", wantErr: "\"4121\" is both a file ID and a local file\nUse ./4121 to upload the local file, or run from a directory without it to use file 4121."},
+		{arg: "2024", wantID: 2024}, // a directory can't be an input, so this is the ID
+		{arg: "0", wantErr: "invalid file ID: 0"},
+		{arg: "missing.bin", wantErr: `"missing.bin" is neither a file ID nor a local file`},
+		{arg: "logs", wantErr: `"logs" is a directory`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.arg, func(t *testing.T) {
+			id, path, err := classifyInput(tt.arg)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil || id != tt.wantID || path != tt.wantPath {
+				t.Errorf("classifyInput(%q) = %d, %q, %v; want %d, %q", tt.arg, id, path, err, tt.wantID, tt.wantPath)
+			}
+		})
+	}
+}

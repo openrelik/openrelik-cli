@@ -7,29 +7,127 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/openrelik/openrelik-cli/util"
 	openrelik "github.com/openrelik/openrelik-go-client"
 )
 
+// --- Auth ---
+
+// AuthStatusView renders the server and API key that commands use, where
+// each comes from, and the user the key logs in as. The key itself is never
+// shown.
+type AuthStatusView struct {
+	credentials
+	User  *openrelik.User // nil if the login couldn't be checked
+	Error string          // why the login check failed
+}
+
+func (v *AuthStatusView) RenderHuman(w io.Writer) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	server, key := "not set", "not set"
+	if v.ServerURL != "" {
+		server = fmt.Sprintf("%s (from %s)", v.ServerURL, v.ServerSource)
+	}
+	if v.APIKey != "" {
+		key = fmt.Sprintf("set (from %s)", v.APIKeySource)
+	}
+	fmt.Fprintf(tw, "Server\t%s\n", server)
+	fmt.Fprintf(tw, "API key\t%s\n", key)
+	if v.User != nil {
+		fmt.Fprintf(tw, "User\t%s\n", v.User.Username)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	// Make an override visible: the active server is what 'auth list' and
+	// 'auth switch' show, but it isn't what commands talk to.
+	if v.ActiveServer != "" && v.ActiveServer != v.ServerURL {
+		fmt.Fprintf(w, "\nThe active server, %s, is not used while %s is set.\n", v.ActiveServer, v.ServerSource)
+	}
+	return nil
+}
+
+func (v *AuthStatusView) RenderVerbose(w io.Writer) error { return v.RenderHuman(w) }
+
+func (v *AuthStatusView) UnwrapJSON() any {
+	return struct {
+		Server       string          `json:"server"`
+		ServerSource string          `json:"server_source"`
+		APIKeySet    bool            `json:"api_key_set"`
+		APIKeySource string          `json:"api_key_source"`
+		ActiveServer string          `json:"active_server"`
+		User         *openrelik.User `json:"user"`
+		Error        string          `json:"error,omitempty"`
+	}{v.ServerURL, v.ServerSource, v.APIKey != "", v.APIKeySource, v.ActiveServer, v.User, v.Error}
+}
+
 // --- Files ---
 
-// FileInfoView renders a single file's key fields for human consumption.
+// FileInfoView renders a single file's metadata for human consumption,
+// including where it came from, every hash and exact timestamps.
 type FileInfoView struct{ *openrelik.File }
 
 func (v *FileInfoView) RenderHuman(w io.Writer) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(tw, "ID\t%d\n", v.ID)
 	fmt.Fprintf(tw, "Name\t%s\n", v.DisplayName)
-	fmt.Fprintf(tw, "Size\t%s\n", util.FormatBytes(v.Filesize))
+	if v.OriginalPath != nil && *v.OriginalPath != "" {
+		fmt.Fprintf(tw, "Original path\t%s\n", *v.OriginalPath)
+	}
+	if v.Description != nil && *v.Description != "" {
+		fmt.Fprintf(tw, "Description\t%s\n", *v.Description)
+	}
+	if v.Folder.ID != 0 {
+		folder := strconv.Itoa(v.Folder.ID)
+		if v.Folder.DisplayName != "" {
+			folder += " (" + v.Folder.DisplayName + ")"
+		}
+		fmt.Fprintf(tw, "Folder\t%s\n", folder)
+	}
+	if v.User.Username != "" {
+		fmt.Fprintf(tw, "Owner\t%s\n", v.User.Username)
+	}
+	fmt.Fprintf(tw, "Size\t%s\n", exactSize(v.Filesize))
 	fmt.Fprintf(tw, "Type\t%s\n", v.DataType)
 	fmt.Fprintf(tw, "MIME\t%s\n", v.MagicMime)
-	if v.HashSHA256 != "" {
-		fmt.Fprintf(tw, "SHA256\t%s\n", v.HashSHA256)
+	if v.MagicText != "" {
+		fmt.Fprintf(tw, "Magic\t%s\n", v.MagicText)
 	}
-	fmt.Fprintf(tw, "Updated\t%s\n", util.FormatTimeAgo(v.UpdatedAt))
+	// Every hash is listed, so a missing one is visibly missing rather than
+	// left out. The server doesn't hash very large files.
+	ssdeep := ""
+	if v.HashSSDeep != nil {
+		ssdeep = *v.HashSSDeep
+	}
+	for _, h := range []struct{ name, value string }{
+		{"MD5", v.HashMD5}, {"SHA1", v.HashSHA1}, {"SHA256", v.HashSHA256}, {"SSDeep", ssdeep},
+	} {
+		if h.value == "" {
+			h.value = "not computed"
+		}
+		fmt.Fprintf(tw, "%s\t%s\n", h.name, h.value)
+	}
+	fmt.Fprintf(tw, "Created\t%s\n", util.FormatTimeWithAge(v.CreatedAt))
+	fmt.Fprintf(tw, "Updated\t%s\n", util.FormatTimeWithAge(v.UpdatedAt))
+	if v.IsDeleted {
+		deleted := "yes"
+		if v.DeletedAt != nil {
+			deleted += ", " + util.FormatTimeWithAge(*v.DeletedAt)
+		}
+		fmt.Fprintf(tw, "Deleted\t%s\n", deleted)
+	}
 	return tw.Flush()
+}
+
+// exactSize formats a file size for a single file's metadata: the size in
+// readable units, followed by the exact number of bytes when the units
+// round it, e.g. "11.1KB (11366 bytes)".
+func exactSize(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d bytes", n)
+	}
+	return fmt.Sprintf("%s (%d bytes)", util.FormatBytes(n), n)
 }
 
 func (v *FileInfoView) UnwrapJSON() any { return v.File }
@@ -172,7 +270,7 @@ func (v *FolderSearchView) RenderHuman(w io.Writer) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tPATH\tUPDATED")
 	for _, f := range v.Folders {
-		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.Path, util.FormatTimeAgo(f.UpdatedAt))
+		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.Path, util.FormatTime(f.UpdatedAt))
 	}
 	return tw.Flush()
 }
@@ -217,13 +315,13 @@ func (v *FolderContentsView) RenderHuman(w io.Writer) error {
 	for _, e := range v.Entries {
 		if f := e.folder; f != nil {
 			fmt.Fprintf(tw, "%d\t%s/\t-\tfolder\t%s\n",
-				f.ID, f.DisplayName, util.FormatTimeAgo(f.UpdatedAt))
+				f.ID, f.DisplayName, util.FormatTime(f.UpdatedAt))
 			continue
 		}
 		f := e.file
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n",
 			f.ID, f.DisplayName, util.FormatBytes(f.Filesize),
-			f.DataType, util.FormatTimeAgo(f.UpdatedAt))
+			f.DataType, util.FormatTime(f.UpdatedAt))
 	}
 	return tw.Flush()
 }
@@ -441,7 +539,7 @@ func renderTasks(w io.Writer, tasks []openrelik.Task, verbose bool) error {
 		cols := []string{t.DisplayName, status, runtime}
 		blank := []string{"", "", ""}
 		if verbose {
-			cols = append([]string{strconv.Itoa(t.ID), t.UUID}, append(cols, formatTime(t.CreatedAt), formatTime(t.UpdatedAt))...)
+			cols = append([]string{strconv.Itoa(t.ID), t.UUID}, append(cols, util.FormatTime(t.CreatedAt), util.FormatTime(t.UpdatedAt))...)
 			blank = make([]string, len(cols))
 		}
 		if len(t.OutputFiles) == 0 {
@@ -459,14 +557,6 @@ func renderTasks(w io.Writer, tasks []openrelik.Task, verbose bool) error {
 	return tw.Flush()
 }
 
-// formatTime formats an exact timestamp in UTC, as in verbose output.
-func formatTime(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	return t.UTC().Format(time.RFC3339)
-}
-
 // WorkflowInfoView renders workflow metadata: its folder, input files,
 // tasks with their output files, and the settings each task ran with. The
 // raw SpecJSON blob is only included in JSON output.
@@ -478,9 +568,9 @@ func (v *WorkflowInfoView) RenderHuman(w io.Writer) error { return v.render(w, f
 func (v *WorkflowInfoView) RenderVerbose(w io.Writer) error { return v.render(w, true) }
 
 func (v *WorkflowInfoView) render(w io.Writer, verbose bool) error {
-	when := util.FormatTimeAgo
+	when := util.FormatTimeWithAge
 	if verbose {
-		when = formatTime
+		when = util.FormatTime
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(tw, "ID\t%d\n", v.ID)
@@ -598,9 +688,9 @@ func (v *WorkflowListView) render(w io.Writer, verbose bool) error {
 				ids[i] = strconv.Itoa(f.ID)
 			}
 			fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n", wf.ID, wf.UUID, wf.DisplayName, wf.Folder.ID,
-				wf.User.Username, strings.Join(ids, ","), tasks, formatTime(wf.CreatedAt), formatTime(wf.UpdatedAt))
+				wf.User.Username, strings.Join(ids, ","), tasks, util.FormatTime(wf.CreatedAt), util.FormatTime(wf.UpdatedAt))
 		} else {
-			fmt.Fprintf(tw, "%d\t%s\t%d\t%s\t%s\n", wf.ID, wf.DisplayName, wf.Folder.ID, tasks, util.FormatTimeAgo(wf.CreatedAt))
+			fmt.Fprintf(tw, "%d\t%s\t%d\t%s\t%s\n", wf.ID, wf.DisplayName, wf.Folder.ID, tasks, util.FormatTime(wf.CreatedAt))
 		}
 	}
 	return tw.Flush()

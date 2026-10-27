@@ -42,7 +42,7 @@ With a single argument, or with "/" as FOLDER, a new root folder is
 created instead, since files can't be stored directly at the root. A
 single directory becomes the new root folder itself; anything else goes
 into a root folder named after the current time, e.g.
-"Upload 2026-10-27 14:05". Use --name to choose the name.
+"Upload 2026-10-27 14:05 UTC". Use --name to choose the name.
 
 Files given directly are skipped if FOLDER already holds a file with the
 same name and SHA256, so an interrupted upload can be run again. If the
@@ -211,7 +211,7 @@ func defaultUploadFolderName(paths []string, isDir []bool, now time.Time) string
 	if len(paths) == 1 && isDir[0] {
 		return localDirName(paths[0])
 	}
-	return "Upload " + now.Format("2006-01-02 15:04")
+	return "Upload " + now.UTC().Format("2006-01-02 15:04") + " UTC"
 }
 
 // localDirName returns the name of the directory at path, resolving "." and

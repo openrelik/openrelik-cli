@@ -295,7 +295,7 @@ func ambiguousFileError(path string, matches []openrelik.FolderFile) error {
 	fmt.Fprintln(tw, "ID\tNAME\tSIZE\tUPDATED")
 	for _, f := range matches {
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", f.ID, f.DisplayName,
-			util.FormatBytes(f.Filesize), util.FormatTimeAgo(f.UpdatedAt))
+			util.FormatBytes(f.Filesize), util.FormatTime(f.UpdatedAt))
 	}
 	tw.Flush()
 	b.WriteString("\nUse one of the IDs above instead of the path.")

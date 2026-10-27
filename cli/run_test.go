@@ -458,3 +458,38 @@ func TestRunWorkerHelp(t *testing.T) {
 		})
 	}
 }
+
+// TestRunAmbiguousInput checks that a number that is also a local file name
+// is rejected before anything is created, even with --dry-run.
+func TestRunAmbiguousInput(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	if err := config.SaveWorkersCache([]openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Any request would mean something was created.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	t.Chdir(t.TempDir())
+	os.WriteFile("123", []byte("local evidence"), 0o644)
+
+	for _, args := range [][]string{{"run", "strings", "123"}, {"run", "--dry-run", "strings", "123"}} {
+		root := NewRootCmd()
+		stdout := new(bytes.Buffer)
+		root.SetOut(stdout)
+		root.SetErr(new(bytes.Buffer))
+		root.SetArgs(args)
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), `"123" is both a file ID and a local file`) {
+			t.Errorf("%v: expected an ambiguity error, got %v", args, err)
+		}
+		if stdout.Len() > 0 {
+			t.Errorf("%v: expected no output, got %q", args, stdout.String())
+		}
+	}
+}

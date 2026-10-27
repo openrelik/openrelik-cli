@@ -25,11 +25,55 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/openrelik/openrelik-go-client"
 )
+
+// fileIDPattern matches inputs that are file IDs rather than local paths.
+var fileIDPattern = regexp.MustCompile(`^[0-9]+$`)
+
+// CheckInputs checks that every input to 'run' is either a file ID or a
+// local file, without uploading anything, so that mistakes are caught
+// before a workflow is created or previewed.
+func CheckInputs(args []string) error {
+	for _, arg := range args {
+		if _, _, err := classifyInput(arg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// classifyInput returns the file ID for an input made only of digits, or the
+// path for a local file. A number that is also the name of a local file is
+// an error rather than a guess: picking either one could run the workflow
+// on the wrong evidence. Local paths can be written as ./NAME to make them
+// unambiguous.
+func classifyInput(arg string) (id int, path string, err error) {
+	info, statErr := os.Stat(arg)
+	if fileIDPattern.MatchString(arg) {
+		id, err := strconv.Atoi(arg)
+		if err != nil || id == 0 {
+			return 0, "", fmt.Errorf("invalid file ID: %s", arg)
+		}
+		if statErr == nil && !info.IsDir() {
+			return 0, "", fmt.Errorf("%q is both a file ID and a local file\nUse ./%s to upload the local file, or run from a directory without it to use file %d.", arg, arg, id)
+		}
+		return id, "", nil
+	}
+	switch {
+	case os.IsNotExist(statErr):
+		return 0, "", fmt.Errorf("%q is neither a file ID nor a local file", arg)
+	case statErr != nil:
+		return 0, "", fmt.Errorf("failed to stat file %s: %w", arg, statErr)
+	case info.IsDir():
+		return 0, "", fmt.Errorf("%q is a directory; give files or file IDs (upload directories with 'openrelik upload')", arg)
+	}
+	return 0, arg, nil
+}
 
 // ResolveInputs takes a slice of strings that can be either file IDs (integers)
 // or local file paths. It uploads local files to an OpenRelik folder.
@@ -39,17 +83,14 @@ func ResolveInputs(ctx context.Context, client *openrelik.Client, args []string,
 	var totalUploaded int64
 
 	for _, arg := range args {
-		if id, err := strconv.Atoi(arg); err == nil {
-			fileIDs = append(fileIDs, id)
+		id, path, err := classifyInput(arg)
+		if err != nil {
+			return nil, 0, err
+		}
+		if path != "" {
+			filesToUpload = append(filesToUpload, path)
 		} else {
-			// Check if it's a local file
-			if info, err := os.Stat(arg); err == nil && !info.IsDir() {
-				filesToUpload = append(filesToUpload, arg)
-			} else if err != nil && !os.IsNotExist(err) {
-				return nil, 0, fmt.Errorf("failed to stat file %s: %w", arg, err)
-			} else {
-				return nil, 0, fmt.Errorf("argument %s is neither a File ID nor a local file path", arg)
-			}
+			fileIDs = append(fileIDs, id)
 		}
 	}
 

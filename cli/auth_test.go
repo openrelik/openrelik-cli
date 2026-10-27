@@ -2,6 +2,10 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/openrelik/openrelik-cli/config"
@@ -122,29 +126,6 @@ func TestLoginCmd(t *testing.T) {
 		}
 	})
 
-	t.Run("AuthStatus", func(t *testing.T) {
-		s := &config.Settings{
-			ActiveServer: "http://test-server",
-			Servers:      []config.ServerConfig{{URL: "http://test-server"}},
-		}
-		config.SaveSettings(s)
-
-		root := NewRootCmd()
-		out := new(bytes.Buffer)
-		root.SetOut(out)
-
-		root.SetArgs([]string{"auth", "status"})
-
-		if err := root.Execute(); err != nil {
-			t.Fatalf("Execute() failed: %v", err)
-		}
-
-		expected := "Active server: http://test-server\n"
-		if out.String() != expected {
-			t.Errorf("expected output %q, got %q", expected, out.String())
-		}
-	})
-
 	t.Run("AuthList", func(t *testing.T) {
 		s := &config.Settings{
 			ActiveServer: "http://server1",
@@ -211,4 +192,116 @@ func TestLoginCmd(t *testing.T) {
 			t.Errorf("expected error %q, got %q", "API key is required", err.Error())
 		}
 	})
+}
+
+func TestAuthStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/users/me/" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("x-openrelik-refresh-token") != "good-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"detail": "Invalid token"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id": 4, "username": "analyst"}`)
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name        string
+		active      string // active server in the settings file
+		storedKey   string // key stored for the active server
+		envServer   string
+		envKey      string
+		args        []string
+		wantOut     string // exact output, with {settings}, {credentials} and {url} filled in
+		wantErr     string
+		notInOutput string
+	}{
+		{
+			name:      "configured login",
+			active:    server.URL,
+			storedKey: "good-key",
+			wantOut:   "Server   {url} (from {settings})\nAPI key  set (from {credentials})\nUser     analyst\n",
+		},
+		{
+			name:      "environment overrides the active server",
+			active:    "http://configured.example",
+			storedKey: "other-key",
+			envServer: server.URL,
+			envKey:    "good-key",
+			wantOut: "Server   {url} (from OPENRELIK_SERVER_URL)\nAPI key  set (from OPENRELIK_API_KEY)\nUser     analyst\n\n" +
+				"The active server, http://configured.example, is not used while OPENRELIK_SERVER_URL is set.\n",
+		},
+		{
+			name:      "rejected key",
+			active:    server.URL,
+			storedKey: "bad-key",
+			wantOut:   "Server   {url} (from {settings})\nAPI key  set (from {credentials})\n",
+			wantErr:   "the login to " + server.URL + " doesn't work",
+		},
+		{
+			name:    "no key",
+			active:  server.URL,
+			wantOut: "Server   {url} (from {settings})\nAPI key  not set\n",
+			wantErr: "no API key is set for " + server.URL,
+		},
+		{
+			name:    "nothing configured",
+			wantOut: "Server   not set\nAPI key  not set\n",
+			wantErr: "no server is set",
+		},
+		{
+			name:        "JSON never includes the key",
+			active:      server.URL,
+			storedKey:   "good-key",
+			args:        []string{"--format", "json"},
+			wantOut:     `"api_key_set": true`,
+			notInOutput: "good-key",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config.SetBaseDir(t.TempDir())
+			defer config.SetBaseDir("")
+			t.Setenv("OPENRELIK_SERVER_URL", tt.envServer)
+			t.Setenv("OPENRELIK_API_KEY", tt.envKey)
+			if tt.active != "" {
+				config.SaveSettings(&config.Settings{ActiveServer: tt.active, Servers: []config.ServerConfig{{URL: tt.active}}})
+			}
+			if tt.storedKey != "" {
+				config.SaveCredentials(&config.Credentials{APIKeys: map[string]string{tt.active: tt.storedKey}})
+			}
+			settingsPath, _ := config.SettingsPath()
+			credentialsPath, _ := config.CredentialsPath()
+
+			root := NewRootCmd()
+			out := new(bytes.Buffer)
+			root.SetOut(out)
+			root.SetErr(new(bytes.Buffer))
+			root.SetArgs(append([]string{"auth", "status"}, tt.args...))
+			err := root.Execute()
+
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			want := strings.NewReplacer("{settings}", settingsPath, "{credentials}", credentialsPath, "{url}", server.URL).Replace(tt.wantOut)
+			if tt.notInOutput != "" {
+				if !strings.Contains(out.String(), want) || strings.Contains(out.String(), tt.notInOutput) {
+					t.Errorf("output should contain %q and not %q:\n%s", want, tt.notInOutput, out.String())
+				}
+				return
+			}
+			if out.String() != want {
+				t.Errorf("output:\n%s\nwant:\n%s", out.String(), want)
+			}
+		})
+	}
 }

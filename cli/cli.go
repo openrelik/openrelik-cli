@@ -82,45 +82,66 @@ func unknownSubcommandArgs(cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("%s\n\nRun '%s --help' for usage.", msg, cmd.CommandPath())
 }
 
+// credentials are the server and API key that commands use, and where each
+// came from, for 'auth status'.
+type credentials struct {
+	ServerURL    string
+	ServerSource string // e.g. "OPENRELIK_SERVER_URL"; empty if no server is set
+	APIKey       string
+	APIKeySource string // empty if no key is set
+	// ActiveServer is the active server in the settings file, which an
+	// environment variable or flag may override.
+	ActiveServer string
+}
+
+// resolveCredentials finds the server and API key in order of precedence:
+// command-line flag, environment variable, then the config files. The key
+// stored for a server is used whichever way the server was chosen.
+func resolveCredentials() credentials {
+	var c credentials
+	if settings, _ := config.LoadSettings(); settings != nil {
+		if active := settings.GetActiveServer(); active != nil {
+			c.ActiveServer = active.URL
+		}
+	}
+	switch {
+	case serverURL != "":
+		c.ServerURL, c.ServerSource = serverURL, "command line"
+	case os.Getenv("OPENRELIK_SERVER_URL") != "":
+		c.ServerURL, c.ServerSource = os.Getenv("OPENRELIK_SERVER_URL"), "OPENRELIK_SERVER_URL"
+	case c.ActiveServer != "":
+		c.ServerURL = c.ActiveServer
+		c.ServerSource, _ = config.SettingsPath()
+	}
+
+	switch {
+	case apiKey != "":
+		c.APIKey, c.APIKeySource = apiKey, "command line"
+	case os.Getenv("OPENRELIK_API_KEY") != "":
+		c.APIKey, c.APIKeySource = os.Getenv("OPENRELIK_API_KEY"), "OPENRELIK_API_KEY"
+	case c.ServerURL != "":
+		if creds, _ := config.LoadCredentials(); creds != nil && creds.APIKeys[c.ServerURL] != "" {
+			c.APIKey = creds.APIKeys[c.ServerURL]
+			c.APIKeySource, _ = config.CredentialsPath()
+		}
+	}
+	return c
+}
+
 // NewAPIClient can be replaced to customize how the API client is constructed:
 //
 //	cli.NewAPIClient = func() (*openrelik.Client, error) {
 //		return openrelik.NewClient(myURL, myKey, openrelik.WithHTTPClient(myHTTPClient))
 //	}
 var NewAPIClient = func() (*openrelik.Client, error) {
-	s := serverURL
-	if s == "" {
-		s = os.Getenv("OPENRELIK_SERVER_URL")
-	}
-	var settings *config.Settings
-	if s == "" {
-		if settings, _ = config.LoadSettings(); settings != nil {
-			if active := settings.GetActiveServer(); active != nil {
-				s = active.URL
-			}
-		}
-	}
-
-	k := apiKey
-	if k == "" {
-		k = os.Getenv("OPENRELIK_API_KEY")
-	}
-	if k == "" {
-		if creds, _ := config.LoadCredentials(); creds != nil && s != "" {
-			if val, ok := creds.APIKeys[s]; ok {
-				k = val
-			}
-		}
-	}
-
-	if s == "" {
+	c := resolveCredentials()
+	if c.ServerURL == "" {
 		return nil, fmt.Errorf("server URL is required (use OPENRELIK_SERVER_URL env var, or run 'openrelik auth login')")
 	}
-	if k == "" {
+	if c.APIKey == "" {
 		return nil, fmt.Errorf("API key is required (use OPENRELIK_API_KEY env var, or run 'openrelik auth login')")
 	}
-
-	return openrelik.NewClient(s, k)
+	return openrelik.NewClient(c.ServerURL, c.APIKey)
 }
 
 func newClient() (*openrelik.Client, error) { return NewAPIClient() }

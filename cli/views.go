@@ -61,16 +61,20 @@ func (v *FolderCreatedView) UnwrapJSON() any {
 // UploadView renders the result of 'upload': the root folder it
 // created, if any, and one line per uploaded file.
 type UploadView struct {
-	Created  *openrelik.Folder
-	FolderID int
-	Uploads  []uploadedFile
-	Skipped  []skippedFile
+	Created     *openrelik.Folder
+	FolderID    int
+	Uploads     []uploadedFile
+	Skipped     []skippedFile
+	NotUploaded []notUploadedDir
 }
 
 func (v *UploadView) renderSkipped(w io.Writer) {
 	for _, s := range v.Skipped {
 		fmt.Fprintf(w, "Skipped %q: already in folder %d as file %d (%s)\n",
 			filepath.Base(s.Path), s.FolderID, s.FileID, s.Reason)
+	}
+	for _, d := range v.NotUploaded {
+		fmt.Fprintf(w, "Not uploaded %q: %s\n", d.Path, d.Reason)
 	}
 }
 
@@ -81,9 +85,19 @@ func (v *UploadView) RenderHuman(w io.Writer) error {
 	for _, u := range v.Uploads {
 		fmt.Fprintf(w, "File %q uploaded to folder %d (ID %d)\n",
 			u.File.DisplayName, u.FolderID, u.File.ID)
+		fmt.Fprintf(w, "  SHA256 %s (%s)\n", u.SHA256, verifiedText(u.Verified))
 	}
 	v.renderSkipped(w)
 	return nil
+}
+
+// verifiedText describes whether a transferred file's SHA256 matched the
+// server's.
+func verifiedText(verified bool) string {
+	if verified {
+		return "verified"
+	}
+	return "not verified: the server has no hash for this file yet"
 }
 
 func (v *UploadView) RenderVerbose(w io.Writer) error {
@@ -95,7 +109,7 @@ func (v *UploadView) RenderVerbose(w io.Writer) error {
 		files = append(files, *u.File)
 	}
 	util.FprintTable(w, files)
-	if len(v.Uploads) > 0 && len(v.Skipped) > 0 {
+	if len(v.Uploads) > 0 && len(v.Skipped)+len(v.NotUploaded) > 0 {
 		fmt.Fprintln(w)
 	}
 	v.renderSkipped(w)
@@ -111,13 +125,30 @@ func (v *UploadView) UnwrapJSON() any {
 	if skipped == nil {
 		skipped = []skippedFile{}
 	}
+	notUploaded := v.NotUploaded
+	if notUploaded == nil {
+		notUploaded = []notUploadedDir{}
+	}
 	return struct {
-		FolderID int               `json:"folder_id"`
-		Created  *openrelik.Folder `json:"created_folder"`
-		Uploads  []uploadedFile    `json:"uploads"`
-		Skipped  []skippedFile     `json:"skipped"`
-	}{v.FolderID, v.Created, uploads, skipped}
+		FolderID    int               `json:"folder_id"`
+		Created     *openrelik.Folder `json:"created_folder"`
+		Uploads     []uploadedFile    `json:"uploads"`
+		Skipped     []skippedFile     `json:"skipped"`
+		NotUploaded []notUploadedDir  `json:"not_uploaded"`
+	}{v.FolderID, v.Created, uploads, skipped, notUploaded}
 }
+
+// DownloadView renders the result of 'download': where the file was saved
+// and its SHA256.
+type DownloadView struct{ *util.SavedFile }
+
+func (v *DownloadView) RenderHuman(w io.Writer) error {
+	fmt.Fprintf(w, "File %d saved to %q\n", v.FileID, v.Path)
+	fmt.Fprintf(w, "  SHA256 %s (%s)\n", v.SHA256, verifiedText(v.Verified))
+	return nil
+}
+
+func (v *DownloadView) UnwrapJSON() any { return v.SavedFile }
 
 // searchFolder is a folder search result with its full path.
 type searchFolder struct {

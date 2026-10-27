@@ -16,7 +16,11 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -216,5 +220,56 @@ func TestSliceArgs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunFailedWorkflow checks that 'run' exits with an error when the
+// workflow fails, after downloading the results that were produced.
+func TestRunFailedWorkflow(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	testWorkers := []openrelik.Worker{
+		{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"},
+	}
+	if err := config.SaveWorkersCache(testWorkers); err != nil {
+		t.Fatalf("Failed to save workers cache: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch path := r.URL.Path; {
+		case strings.HasSuffix(path, "/workflows/") || strings.HasSuffix(path, "/run/"):
+			fmt.Fprint(w, `{"id": 100, "folder": {"id": 1}}`)
+		case strings.HasSuffix(path, "/status/"):
+			fmt.Fprint(w, `{"status": "FAILURE", "tasks": [{"uuid": "t1", "display_name": "Strings", "status_short": "FAILURE"}]}`)
+		case path == "/api/v1/workflows/100":
+			fmt.Fprint(w, `{"id": 100, "tasks": [{"uuid": "t1", "id": 1, "display_name": "Strings",
+				"output_files": [{"id": 10, "display_name": "partial.txt"}]}]}`)
+		case path == "/api/v1/files/123":
+			fmt.Fprint(w, `{"id": 123, "display_name": "input.bin", "folder": {"id": 1}}`)
+		case path == "/api/v1/files/10":
+			fmt.Fprint(w, `{"id": 10, "display_name": "partial.txt", "filesize": 7}`)
+		case path == "/api/v1/files/10/download":
+			fmt.Fprint(w, "partial")
+		default:
+			t.Logf("unhandled %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+	outDir := t.TempDir()
+	root := NewRootCmd()
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"run", "-q", "-o", outDir, "strings", "123"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "workflow 100 failed") {
+		t.Fatalf("expected error containing %q, got %v", "workflow 100 failed", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(outDir, "partial.txt")); string(got) != "partial" {
+		t.Errorf("expected the results to be downloaded, got %q", got)
 	}
 }

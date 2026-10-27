@@ -17,6 +17,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -223,6 +224,9 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			if err != nil && lastStatus == nil {
 				return err
 			}
+			// A failed workflow may still have results from the tasks that
+			// succeeded, so download them before reporting the failure.
+			workflowErr := err
 
 			// Phase 4: Download results
 			var fullWorkflow *openrelik.Workflow
@@ -230,17 +234,20 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			if lastStatus != nil {
 				totalDownloaded, fullWorkflow, err = util.DownloadResults(cmd.Context(), client, workflow.ID, downloadPolicy, taskDownloadPrefs, outputDir, taskFolders, outputFormat, showProgress)
 				if err != nil {
-					return err
+					return errors.Join(workflowErr, fmt.Errorf("results of workflow %d were not downloaded: %w", workflow.ID, err))
 				}
 			}
 
 			if outputFormat != "human" && fullWorkflow != nil {
-				return formatAndPrint(cmd, &WorkflowInfoView{Workflow: fullWorkflow})
+				if err := formatAndPrint(cmd, &WorkflowInfoView{Workflow: fullWorkflow}); err != nil {
+					return err
+				}
+				return workflowErr
 			}
 
 			monitor.PrintSummary(startTime, totalUploaded, totalDownloaded)
 
-			return nil
+			return workflowErr
 		},
 	}
 

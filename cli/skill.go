@@ -56,7 +56,7 @@ func newSkillCmd() *cobra.Command {
 
 func newSkillInstallCmd() *cobra.Command {
 	var harness string
-	var local bool
+	var local, yes bool
 
 	cmd := &cobra.Command{
 		Use:   "install [dir]",
@@ -66,10 +66,19 @@ on the workers currently registered with the OpenRelik server.
 
 If a directory is provided, the skill will be installed in <dir>/openrelik.
 If no directory is provided, it defaults to the global or local directory
-configured for the specified harness.`,
+configured for the specified harness.
+
+You are asked before the directory is created or replaced; without a
+terminal to ask on, the command fails instead. Use --yes to skip the
+question.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+
+			paths, ok := harnesses[harness]
+			if !ok {
+				return fmt.Errorf("unknown harness: %s", harness)
+			}
 
 			// Load workers from cache or API
 			workers, err := config.LoadOrRefreshWorkersCache(ctx, func(ctx context.Context) ([]openrelik.Worker, error) {
@@ -88,10 +97,6 @@ configured for the specified harness.`,
 			if len(args) > 0 {
 				baseDir = args[0]
 			} else {
-				paths, ok := harnesses[harness]
-				if !ok {
-					return fmt.Errorf("unknown harness: %s", harness)
-				}
 				if local {
 					baseDir = paths.Local
 				} else {
@@ -112,36 +117,30 @@ configured for the specified harness.`,
 			}
 
 			// Check if the destination exists and confirm with user
+			var question string
 			info, err := os.Stat(destDir)
-			if err == nil {
-				if info.IsDir() {
-					if !quiet {
-						fmt.Fprintf(cmd.OutOrStdout(), "Warning: Destination directory %s already exists.\n", absDestDir)
-						confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), "Overwrite?")
-						if err != nil {
-							return err
-						}
-						if !confirmed {
-							fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
-							return nil
-						}
-					}
-				} else {
-					return fmt.Errorf("destination %s exists and is not a directory", absDestDir)
-				}
-			} else if os.IsNotExist(err) {
-				if !quiet {
-					confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), fmt.Sprintf("Create directory %s and install skill?", absDestDir))
-					if err != nil {
-						return err
-					}
-					if !confirmed {
-						fmt.Fprintln(cmd.OutOrStdout(), "Installation cancelled.")
-						return nil
-					}
-				}
-			} else {
+			switch {
+			case err == nil && !info.IsDir():
+				return fmt.Errorf("destination %s exists and is not a directory", absDestDir)
+			case err == nil:
+				question = fmt.Sprintf("Destination directory %s already exists. Overwrite?", absDestDir)
+			case os.IsNotExist(err):
+				question = fmt.Sprintf("Create directory %s and install skill?", absDestDir)
+			default:
 				return err
+			}
+			if !yes && !quiet {
+				if !stdinIsTerminal(cmd.InOrStdin()) {
+					return fmt.Errorf("%s\nNo terminal to ask on; use --yes to confirm.", question)
+				}
+				confirmed, err := util.Confirm(cmd.ErrOrStderr(), cmd.InOrStdin(), question)
+				if err != nil {
+					return err
+				}
+				if !confirmed {
+					fmt.Fprintln(cmd.ErrOrStderr(), "Installation cancelled.")
+					return nil
+				}
 			}
 
 			if err := GenerateSkillFile(destDir, workers); err != nil {
@@ -162,6 +161,7 @@ configured for the specified harness.`,
 
 	cmd.Flags().StringVar(&harness, "harness", "generic", "Target agent framework (generic, codex, gemini, claude, opencode, pi, copilot)")
 	cmd.Flags().BoolVar(&local, "local", false, "Install in the local directory according to the harness")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Create or replace the skill directory without asking")
 
 	return cmd
 }

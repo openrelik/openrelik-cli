@@ -4,7 +4,7 @@ go 1.24.2
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/openrelik/openrelik-go-client v0.2.6
+	github.com/openrelik/openrelik-go-client v0.3.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.30.0
 )

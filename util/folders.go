@@ -30,7 +30,7 @@ const rootFolderPageSize = 100
 func ListAllRootFolders(ctx context.Context, client *openrelik.Client) ([]openrelik.Folder, error) {
 	var folders []openrelik.Folder
 	for page := 1; ; page++ {
-		result, _, err := client.Folders().ListRootFoldersPage(ctx, &openrelik.ListOptions{Page: page, PageSize: rootFolderPageSize})
+		result, _, err := client.Folders().ListRootFoldersPage(ctx, &openrelik.PageOptions{Page: page, PageSize: rootFolderPageSize})
 		if err != nil {
 			return nil, err
 		}

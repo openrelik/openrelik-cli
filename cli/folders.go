@@ -624,7 +624,7 @@ func searchRootFolders(ctx context.Context, client *openrelik.Client, term strin
 func fetchFolderSearch(ctx context.Context, client *openrelik.Client, term string) ([]openrelik.Folder, error) {
 	var folders []openrelik.Folder
 	for page := 1; ; page++ {
-		result, _, err := client.Folders().SearchFolders(ctx, term, &openrelik.ListOptions{Page: page, PageSize: folderPageSize})
+		result, _, err := client.Folders().SearchFolders(ctx, term, &openrelik.PageOptions{Page: page, PageSize: folderPageSize})
 		if err != nil {
 			return nil, err
 		}

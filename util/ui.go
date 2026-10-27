@@ -12,7 +12,10 @@ import (
 	"golang.org/x/term"
 )
 
-const (
+// Colour codes for progress output on stderr. They are empty unless stderr
+// is a terminal that handles them and NO_COLOR is unset, so logs and piped
+// output don't fill with escape codes.
+var (
 	ColorReset  = "\033[0m"
 	ColorDim    = "\033[2m"
 	ColorBold   = "\033[1m"
@@ -23,12 +26,22 @@ const (
 	ColorCyan   = "\033[36m"
 )
 
+func init() {
+	if !IsInteractiveTTY() || os.Getenv("NO_COLOR") != "" {
+		ColorReset, ColorDim, ColorBold, ColorBlue = "", "", "", ""
+		ColorGreen, ColorRed, ColorYellow, ColorCyan = "", "", "", ""
+	}
+}
+
 // ProgressTracker handles the display of a progress bar.
 type ProgressTracker struct {
 	TotalBytes  int64
 	TotalChunks int
 	Action      string
 	Writer      io.Writer
+	// Live redraws the progress bar as it changes. Without it, only one
+	// line is written, when the transfer finishes.
+	Live bool
 
 	currentBytes  int64
 	currentChunks int
@@ -53,6 +66,7 @@ func NewProgressTracker(writer io.Writer, totalBytes int64, action string) *Prog
 	now := time.Now()
 	return &ProgressTracker{
 		Writer:        writer,
+		Live:          isTerminal(writer),
 		TotalBytes:    totalBytes,
 		Action:        action,
 		startTime:     now,
@@ -96,7 +110,7 @@ func (pt *ProgressTracker) Finish() {
 }
 
 func (pt *ProgressTracker) display() {
-	if pt.Writer == nil {
+	if pt.Writer == nil || (!pt.Live && !pt.finished) {
 		return
 	}
 
@@ -105,7 +119,7 @@ func (pt *ProgressTracker) display() {
 
 	// Update Speed (sliding window)
 	isDownloading := strings.HasPrefix(pt.Action, "Download:")
-	if isDownloading {
+	if isDownloading && pt.Live {
 		if len(pt.samples) == 0 || now.Sub(pt.samples[len(pt.samples)-1].timestamp) > 100*time.Millisecond {
 			pt.samples = append(pt.samples, progressSample{now, pt.currentBytes})
 		}
@@ -209,12 +223,17 @@ func (pt *ProgressTracker) display() {
 
 	if isFinished {
 		// Clean line when finished
-		finishSymbol := ColorGreen + "✔"
+		symbol, color := "✔", ColorGreen
 		if isUpload {
-			finishSymbol = ColorBlue + "↑"
+			symbol, color = "↑", ColorBlue
 		} else if isDownload {
-			finishSymbol = ColorGreen + "↓"
+			symbol = "↓"
 		}
+		if !pt.Live {
+			fmt.Fprintf(pt.Writer, "%s %s %s", symbol, cleanAction, strings.Join(stats, " · "))
+			return
+		}
+		finishSymbol := color + symbol
 		fmt.Fprintf(pt.Writer, "\r%s%s %s %s%s%s\033[K", finishSymbol, ColorReset, cleanAction, ColorDim, strings.Join(stats, " · "), ColorReset)
 		return
 	}
@@ -317,10 +336,18 @@ func readLine(r io.Reader) (string, error) {
 	}
 }
 
-// IsInteractiveTTY returns true when stderr is connected to a real terminal.
-// Progress output goes to stderr, so that is the relevant fd to check.
+// IsInteractiveTTY returns true when stderr is connected to a terminal that
+// can redraw lines. Progress output goes to stderr, so that is the relevant
+// fd to check.
 func IsInteractiveTTY() bool {
-	return term.IsTerminal(int(os.Stderr.Fd()))
+	return isTerminal(os.Stderr)
+}
+
+// isTerminal reports whether w is a terminal that can redraw lines; not
+// with TERM=dumb.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd())) && os.Getenv("TERM") != "dumb"
 }
 
 // Spinner handles a simple Unicode terminal spinner.

@@ -70,7 +70,7 @@ func TestDynamicWorkerCommands(t *testing.T) {
 		},
 	}
 
-	if err := config.SaveWorkersCache(testWorkers); err != nil {
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
 		t.Fatalf("Failed to save workers cache: %v", err)
 	}
 
@@ -118,7 +118,7 @@ func TestRunCmdOutputDirValidation(t *testing.T) {
 	testWorkers := []openrelik.Worker{
 		{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"},
 	}
-	if err := config.SaveWorkersCache(testWorkers); err != nil {
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
 		t.Fatalf("Failed to save workers cache: %v", err)
 	}
 
@@ -232,7 +232,7 @@ func TestRunFailedWorkflow(t *testing.T) {
 	testWorkers := []openrelik.Worker{
 		{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"},
 	}
-	if err := config.SaveWorkersCache(testWorkers); err != nil {
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
 		t.Fatalf("Failed to save workers cache: %v", err)
 	}
 
@@ -244,7 +244,8 @@ func TestRunFailedWorkflow(t *testing.T) {
 		case strings.HasSuffix(path, "/status/"):
 			fmt.Fprint(w, `{"status": "FAILURE", "tasks": [{"uuid": "t1", "display_name": "Strings", "status_short": "FAILURE"}]}`)
 		case path == "/api/v1/workflows/100":
-			fmt.Fprint(w, `{"id": 100, "tasks": [{"uuid": "t1", "id": 1, "display_name": "Strings",
+			fmt.Fprint(w, `{"id": 100, "spec_json": "{\"workflow\": {\"tasks\": [{\"uuid\": \"t1\", \"tasks\": []}]}}",
+				"tasks": [{"uuid": "t1", "id": 1, "display_name": "Strings",
 				"output_files": [{"id": 10, "display_name": "partial.txt"}]}]}`)
 		case path == "/api/v1/files/123":
 			fmt.Fprint(w, `{"id": 123, "display_name": "input.bin", "folder": {"id": 1}}`)
@@ -260,6 +261,9 @@ func TestRunFailedWorkflow(t *testing.T) {
 	defer server.Close()
 	t.Setenv("OPENRELIK_API_KEY", "test-key")
 	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	if err := config.SaveWorkersCache(server.URL, testWorkers); err != nil {
+		t.Fatal(err)
+	}
 
 	outDir := t.TempDir()
 	root := NewRootCmd()
@@ -305,7 +309,7 @@ func TestRunDryRunAndSegmentFlags(t *testing.T) {
 			},
 		},
 	}
-	if err := config.SaveWorkersCache(testWorkers); err != nil {
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
 		t.Fatalf("Failed to save workers cache: %v", err)
 	}
 
@@ -404,7 +408,7 @@ func TestRunWorkerHelp(t *testing.T) {
 			},
 		},
 	}
-	if err := config.SaveWorkersCache(testWorkers); err != nil {
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
 		t.Fatalf("Failed to save workers cache: %v", err)
 	}
 
@@ -464,7 +468,7 @@ func TestRunWorkerHelp(t *testing.T) {
 func TestRunAmbiguousInput(t *testing.T) {
 	config.SetBaseDir(t.TempDir())
 	defer config.SetBaseDir("")
-	if err := config.SaveWorkersCache([]openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+	if err := config.SaveWorkersCache("", []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
 		t.Fatal(err)
 	}
 	// Any request would mean something was created.
@@ -491,5 +495,64 @@ func TestRunAmbiguousInput(t *testing.T) {
 		if stdout.Len() > 0 {
 			t.Errorf("%v: expected no output, got %q", args, stdout.String())
 		}
+	}
+}
+
+// TestRunWorkersLoadedLazily checks that the worker list is only fetched
+// when 'run' needs it, and is fetched again for another server.
+func TestRunWorkersLoadedLazily(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	var requests int
+	registered := `[]`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/v1/taskqueue/tasks/registered" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, registered)
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	// A stale cache from another server.
+	if err := config.SaveWorkersCache("http://other.example", []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) (string, error) {
+		root := NewRootCmd()
+		out := new(bytes.Buffer)
+		root.SetOut(out)
+		root.SetErr(out)
+		root.SetArgs(args)
+		err := root.Execute()
+		return out.String(), err
+	}
+
+	if _, err := run("auth", "list"); err != nil || requests != 0 {
+		t.Fatalf("auth list made %d requests, err %v", requests, err)
+	}
+	// A dry run works offline from the cache.
+	if _, err := run("run", "--dry-run", "strings", "123"); err != nil || requests != 0 {
+		t.Fatalf("dry run made %d requests, err %v", requests, err)
+	}
+	// Help lists the workers of the server in use.
+	registered = `[{"task_name": "openrelik-worker-grep.tasks.grep", "display_name": "Grep"}]`
+	out, err := run("run", "--help")
+	if err != nil || requests != 1 || !strings.Contains(out, "Grep") || strings.Contains(out, "Strings") {
+		t.Fatalf("run --help made %d requests, err %v:\n%s", requests, err, out)
+	}
+	// The cache is now for this server, so help doesn't ask again.
+	if _, err := run("run", "--help"); err != nil || requests != 1 {
+		t.Fatalf("second run --help made %d requests, err %v", requests, err)
+	}
+	// A worker registered since the cache was saved.
+	registered = `[{"task_name": "openrelik-worker-yara.tasks.yara", "display_name": "Yara"}]`
+	if _, err := run("run", "yara", "123"); err == nil || !strings.Contains(err.Error(), `"yara" was registered since the list of workers was last updated; run the command again`) {
+		t.Errorf("expected a new-worker error, got %v", err)
+	}
+	if _, err := run("run", "bogus", "123"); err == nil || !strings.Contains(err.Error(), `unknown worker "bogus" (see 'openrelik worker list')`) {
+		t.Errorf("expected an unknown-worker error, got %v", err)
 	}
 }

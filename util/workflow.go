@@ -476,19 +476,59 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 	return spec, positionalArgs, taskDownloadPrefs, meta, nil
 }
 
-// FindWorker identifies a worker by name or task name.
+// WorkerCommand returns the name of a worker's 'run' subcommand: the last
+// part of its task name, e.g. "strings" for
+// "openrelik-worker-strings.tasks.strings".
+func WorkerCommand(w openrelik.Worker) string {
+	return w.TaskName[strings.LastIndex(w.TaskName, ".")+1:]
+}
+
+// FindWorker identifies a worker by command name or task name.
 func FindWorker(name string, workers []openrelik.Worker) *openrelik.Worker {
 	for _, w := range workers {
-		use := w.TaskName
-		parts := strings.Split(w.TaskName, ".")
-		if len(parts) > 0 {
-			use = parts[len(parts)-1]
-		}
-		if use == name || w.TaskName == name {
+		if WorkerCommand(w) == name || w.TaskName == name {
 			return &w
 		}
 	}
 	return nil
+}
+
+// ErrFinalTasksUnknown is returned when a workflow's final tasks can't be
+// worked out from its spec.
+var ErrFinalTasksUnknown = errors.New("can't tell which tasks of the workflow are final")
+
+// FinalTasks returns the UUIDs of the tasks that have no tasks after them in
+// the workflow spec: the end of a chain, and every one of the tasks run in
+// parallel at the end of a workflow. The server lists a workflow's tasks
+// without their order, so the spec is the only record of it.
+func FinalTasks(specJSON *string, tasks []openrelik.Task) (map[string]bool, error) {
+	if specJSON == nil || *specJSON == "" {
+		return nil, fmt.Errorf("%w: it has no spec", ErrFinalTasksUnknown)
+	}
+	var spec WorkflowSpec
+	if err := json.Unmarshal([]byte(*specJSON), &spec); err != nil {
+		return nil, fmt.Errorf("%w: its spec can't be read: %v", ErrFinalTasksUnknown, err)
+	}
+	inWorkflow := map[string]bool{}
+	for _, t := range tasks {
+		inWorkflow[t.UUID] = true
+	}
+	final := map[string]bool{}
+	var walk func([]WorkflowTask)
+	walk = func(nodes []WorkflowTask) {
+		for _, n := range nodes {
+			if len(n.Tasks) > 0 {
+				walk(n.Tasks)
+			} else if inWorkflow[n.UUID] {
+				final[n.UUID] = true
+			}
+		}
+	}
+	walk(spec.Workflow.Tasks)
+	if len(final) == 0 {
+		return nil, fmt.Errorf("%w: none of its tasks match the end of its spec", ErrFinalTasksUnknown)
+	}
+	return final, nil
 }
 
 // FlattenTasks recursively flattens a tree of tasks into a linear slice.

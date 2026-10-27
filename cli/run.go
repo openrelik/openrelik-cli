@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/openrelik/openrelik-cli/config"
@@ -35,9 +34,10 @@ func newRunCmd() *cobra.Command {
 		Short: "Create and run workflows",
 		Long: `Execute OpenRelik workers on files.
 
-Subcommands are dynamically generated from registered workers. Run
-'openrelik worker list' to refresh the worker cache if new workers are
-not yet visible.
+Subcommands are generated from the workers registered on the server. The
+list of workers is cached for an hour, and updated when a workflow is
+started, when this help is shown, or when a worker isn't known. Use
+'openrelik worker list' to update it at any time.
 
 Inputs are either integer file IDs or local file paths (auto-uploaded):
 
@@ -53,7 +53,12 @@ Run workers in parallel with --and (both receive the same input files):
 
   openrelik run strings --and grep --regex "password" 123
 
-Use --dry-run to preview the generated workflow spec without executing it.`,
+When the workflow finishes, the output files of the final tasks are
+downloaded: the end of a chain, or every worker run with --and. Use
+--download all for the output files of every task, or --download none.
+
+Use --dry-run to preview the generated workflow spec without executing it.
+A dry run doesn't contact the server, and uses the cached list of workers.`,
 		TraverseChildren: true,
 	}
 
@@ -70,39 +75,86 @@ Use --dry-run to preview the generated workflow spec without executing it.`,
 	// dry-run applies to all worker subcommands
 	runCmd.PersistentFlags().Bool("dry-run", false, "Generate and display workflow spec without executing")
 
-	// Load workers from cache (auto-refreshing if missing or stale) to build dynamic subcommands.
-	workers, err := config.LoadOrRefreshWorkersCache(context.Background(), func(ctx context.Context) ([]openrelik.Worker, error) {
-		client, err := newClient()
-		if err != nil {
-			return nil, err
+	// The worker subcommands come from the cache, whatever its age, so
+	// building the command tree never waits for a server. The cache is
+	// refreshed when it matters: when a workflow is started, when 'run'
+	// shows its help, and when a worker isn't known.
+	workers, _ := config.LoadCachedWorkers()
+	addWorkerCmds(runCmd, workers)
+
+	// Reached when no worker subcommand matches.
+	runCmd.Args = cobra.ArbitraryArgs
+	runCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return cmd.Help()
 		}
-		ws, _, err := client.Workers().Registered(ctx)
-		return ws, err
-	})
-	if err != nil {
-		// If workers cannot be loaded or fetched, skip dynamic subcommands.
-		return runCmd
+		name := args[0]
+		workers, err := fetchWorkers(cmd.Context())
+		if err != nil {
+			return fmt.Errorf("unknown worker %q, and the list of workers could not be updated: %w", name, err)
+		}
+		addWorkerCmds(cmd, workers)
+		if util.FindWorker(name, workers) != nil {
+			return fmt.Errorf("%q was registered since the list of workers was last updated; run the command again", name)
+		}
+		return fmt.Errorf("unknown worker %q (see 'openrelik worker list')", name)
 	}
 
-	for _, worker := range workers {
-		workerCmd := createWorkerCmd(worker, workers)
-		runCmd.AddCommand(workerCmd)
-	}
+	defaultHelp := runCmd.HelpFunc()
+	runCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		// Worker subcommands show their own help from the cache.
+		if cmd == runCmd {
+			// Don't keep the help waiting long for a slow server.
+			ctx, cancel := context.WithTimeout(context.Background(), helpRefreshTimeout)
+			defer cancel()
+			if workers, err := loadWorkers(ctx); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the list of workers could not be updated, so it may be out of date or empty: %v\n\n", err)
+			} else {
+				addWorkerCmds(cmd, workers)
+			}
+		}
+		defaultHelp(cmd, args)
+	})
 
 	return runCmd
 }
 
-func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *cobra.Command {
-	// Worker names are usually something like "openrelik-worker-strings.tasks.strings"
-	// We want a shorter alias if possible, but for now we'll use the task name parts.
-	use := worker.TaskName
-	parts := strings.Split(worker.TaskName, ".")
-	if len(parts) > 0 {
-		use = parts[len(parts)-1]
-	}
+// helpRefreshTimeout limits how long 'run --help' waits for the server to
+// list its workers.
+const helpRefreshTimeout = 5 * time.Second
 
+// addWorkerCmds replaces the worker subcommands of runCmd.
+func addWorkerCmds(runCmd *cobra.Command, workers []openrelik.Worker) {
+	runCmd.RemoveCommand(runCmd.Commands()...)
+	for _, worker := range workers {
+		runCmd.AddCommand(createWorkerCmd(worker, workers))
+	}
+}
+
+// fetchWorkers gets the workers registered on the server in use, and caches
+// them.
+func fetchWorkers(ctx context.Context) ([]openrelik.Worker, error) {
+	client, err := newClient()
+	if err != nil {
+		return nil, err
+	}
+	workers, _, err := client.Workers().Registered(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_ = config.SaveWorkersCache(resolveCredentials().ServerURL, workers) // best-effort
+	return workers, nil
+}
+
+// loadWorkers returns the workers registered on the server in use, from the
+// cache if it is recent and was saved for that server.
+func loadWorkers(ctx context.Context) ([]openrelik.Worker, error) {
+	return config.LoadOrRefreshWorkersCache(ctx, resolveCredentials().ServerURL, fetchWorkers)
+}
+
+func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:                use + " <INPUT>...",
+		Use:                util.WorkerCommand(worker) + " <INPUT>...",
 		Short:              worker.DisplayName,
 		Long:               worker.Description,
 		DisableFlagParsing: true, // We will parse flags manually for each segment
@@ -201,6 +253,20 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 				return err
 			}
 
+			// The spec was built from the cache, which may be old or
+			// from another server. Check it against the workers
+			// registered now.
+			if _, err := config.LoadWorkersCache(resolveCredentials().ServerURL); err != nil {
+				workers, err := fetchWorkers(cmd.Context())
+				if err != nil {
+					return fmt.Errorf("could not get the registered workers: %w", err)
+				}
+				spec, positionalArgs, taskDownloadPrefs, meta, err = util.BuildWorkflowSpec(cmd.Parent(), segments, delimiter, workers, createWorkerCmd)
+				if err != nil {
+					return err
+				}
+			}
+
 			fileIDs, totalUploaded, err := util.ResolveInputs(cmd.Context(), client, positionalArgs, showProgress, meta.UploadFolderID, meta.UploadFolderName)
 			if err != nil {
 				return err
@@ -252,6 +318,9 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			var saved []*util.SavedFile
 			if lastStatus != nil {
 				saved, fullWorkflow, err = util.DownloadResults(cmd.Context(), client, workflow.ID, downloadPolicy, taskDownloadPrefs, outputDir, taskFolders, outputFormat, showProgress)
+				if errors.Is(err, util.ErrFinalTasksUnknown) {
+					err = fmt.Errorf("%w; get all results with 'openrelik workflow download %d --all'", err, workflow.ID)
+				}
 				if err != nil {
 					return errors.Join(workflowErr, fmt.Errorf("results of workflow %d were not downloaded: %w", workflow.ID, err))
 				}

@@ -62,6 +62,57 @@ func (v *AuthStatusView) UnwrapJSON() any {
 	}{v.ServerURL, v.ServerSource, v.APIKey != "", v.APIKeySource, v.ActiveServer, v.User, v.Error}
 }
 
+// savedServer is a server saved with 'auth login'.
+type savedServer struct {
+	Number      int    `json:"number"`
+	URL         string `json:"url"`
+	Active      bool   `json:"active"`
+	APIKeySaved bool   `json:"api_key_saved"`
+}
+
+// AuthListView renders the saved servers, and points out when an
+// environment variable or flag makes commands use another server.
+type AuthListView struct {
+	credentials
+	Servers []savedServer
+}
+
+func (v *AuthListView) RenderHuman(w io.Writer) error {
+	if len(v.Servers) > 0 {
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "#\tSERVER\tACTIVE\tAPI KEY")
+		for _, s := range v.Servers {
+			active, key := "", "not saved"
+			if s.Active {
+				active = "yes"
+			}
+			if s.APIKeySaved {
+				key = "saved"
+			}
+			fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", s.Number, s.URL, active, key)
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	if v.ServerURL != "" && v.ServerURL != v.ActiveServer {
+		if len(v.Servers) > 0 {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintf(w, "Commands use %s instead while %s is set.\n", v.ServerURL, v.ServerSource)
+	}
+	return nil
+}
+
+func (v *AuthListView) RenderVerbose(w io.Writer) error { return v.RenderHuman(w) }
+
+func (v *AuthListView) UnwrapJSON() any {
+	if v.Servers == nil {
+		return []savedServer{}
+	}
+	return v.Servers
+}
+
 // --- Files ---
 
 // FileInfoView renders a single file's metadata for human consumption,
@@ -459,23 +510,47 @@ func (v *UserMeView) UnwrapJSON() any { return v.User }
 
 // --- Workers ---
 
-// WorkerListView renders registered workers as a table with the machine-usable task name.
+// WorkerListView renders registered workers as a table, with the 'run'
+// subcommand that starts each one.
 type WorkerListView struct{ Workers []openrelik.Worker }
 
 func (v *WorkerListView) RenderHuman(w io.Writer) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "DISPLAY NAME\tDESCRIPTION")
+	fmt.Fprintln(tw, "COMMAND\tDISPLAY NAME\tDESCRIPTION")
 	for _, wk := range v.Workers {
 		desc := wk.Description
 		if len(desc) > 60 {
 			desc = desc[:57] + "..."
 		}
-		fmt.Fprintf(tw, "%s\t%s\n", wk.DisplayName, desc)
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", util.WorkerCommand(wk), wk.DisplayName, desc)
 	}
 	return tw.Flush()
 }
 
-func (v *WorkerListView) UnwrapJSON() any { return v.Workers }
+// RenderVerbose adds the task and queue names, and doesn't shorten the
+// descriptions.
+func (v *WorkerListView) RenderVerbose(w io.Writer) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "COMMAND\tDISPLAY NAME\tTASK NAME\tQUEUE\tDESCRIPTION")
+	for _, wk := range v.Workers {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", util.WorkerCommand(wk), wk.DisplayName, wk.TaskName, wk.QueueName, wk.Description)
+	}
+	return tw.Flush()
+}
+
+// workerJSON is a worker with the name of its 'run' subcommand.
+type workerJSON struct {
+	Command string `json:"command"`
+	openrelik.Worker
+}
+
+func (v *WorkerListView) UnwrapJSON() any {
+	out := make([]workerJSON, len(v.Workers))
+	for i, wk := range v.Workers {
+		out[i] = workerJSON{util.WorkerCommand(wk), wk}
+	}
+	return out
+}
 
 // --- Templates ---
 

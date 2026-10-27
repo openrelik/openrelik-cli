@@ -471,6 +471,12 @@ followed. If the name can't be used, give DESTINATION as a file path.`,
 			return err
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// By convention "-" means stdout, but download only writes
+			// a file once its hash is checked.
+			if len(args) > 1 && args[1] == "-" {
+				return fmt.Errorf("download can't write to stdout, since it checks the SHA256 before saving; use 'openrelik file cat %s' instead, or './-' for a file named \"-\"", args[0])
+			}
+
 			client, err := newClient()
 			if err != nil {
 				return err
@@ -532,7 +538,7 @@ followed. If the name can't be used, give DESTINATION as a file path.`,
 						return err
 					}
 					if !confirmed {
-						return fmt.Errorf("cancelled")
+						return fmt.Errorf("cancelled; %q was not replaced", destPath)
 					}
 				}
 				overwrite = true

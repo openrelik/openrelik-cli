@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,6 +45,10 @@ func TestLoginCmd(t *testing.T) {
 		return []byte("test-api-key"), nil
 	}
 	defer func() { passwordReader = originalPasswordReader }()
+	// The prompts need a terminal; stdin here is a buffer.
+	originalStdinIsTerminal := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return true }
+	defer func() { stdinIsTerminal = originalStdinIsTerminal }()
 	testServer := newMeServer(t, "test-api-key").URL
 	newServer := newMeServer(t, "test-api-key").URL
 
@@ -169,7 +174,7 @@ func TestLoginCmd(t *testing.T) {
 			t.Fatalf("Execute() failed: %v", err)
 		}
 
-		expected := "Configured servers:\n- http://server1 [ACTIVE]\n- http://server2\n"
+		expected := "#  SERVER          ACTIVE  API KEY\n1  http://server1  yes     not saved\n2  http://server2          not saved\n"
 		if out.String() != expected {
 			t.Errorf("expected output %q, got %q", expected, out.String())
 		}
@@ -344,6 +349,9 @@ func TestLoginFailureSavesNothing(t *testing.T) {
 			orig := passwordReader
 			passwordReader = func(int) ([]byte, error) { return []byte(tt.key), nil }
 			defer func() { passwordReader = orig }()
+			origTerminal := stdinIsTerminal
+			stdinIsTerminal = func(io.Reader) bool { return true }
+			defer func() { stdinIsTerminal = origTerminal }()
 
 			root := NewRootCmd()
 			out := new(bytes.Buffer)
@@ -368,5 +376,207 @@ func TestLoginFailureSavesNothing(t *testing.T) {
 				t.Errorf("credentials changed: %v", c.APIKeys)
 			}
 		})
+	}
+}
+
+// runAuth runs an auth command with input on stdin, which counts as a
+// terminal if terminal is set, and returns stdout, stderr and the error.
+func runAuth(t *testing.T, input string, terminal bool, args ...string) (string, string, error) {
+	t.Helper()
+	orig := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return terminal }
+	defer func() { stdinIsTerminal = orig }()
+	root := NewRootCmd()
+	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetIn(strings.NewReader(input))
+	root.SetArgs(append([]string{"auth"}, args...))
+	err := root.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
+func TestLoginNonInteractive(t *testing.T) {
+	server := newMeServer(t, "good-key")
+	orig := passwordReader
+	passwordReader = func(int) ([]byte, error) {
+		t.Error("the key was read from the terminal")
+		return nil, nil
+	}
+	defer func() { passwordReader = orig }()
+
+	tests := []struct {
+		name       string
+		args       []string
+		input      string
+		wantServer string // saved active server; empty if the login should fail
+		wantErr    string
+	}{
+		{name: "key on stdin", args: []string{server.URL, "--api-key-stdin"}, input: "good-key\n", wantServer: server.URL},
+		{name: "trailing slash is dropped", args: []string{server.URL + "/", "--api-key-stdin"}, input: "good-key", wantServer: server.URL},
+		{name: "stdin key needs SERVER", args: []string{"--api-key-stdin"}, input: "good-key\n", wantErr: "--api-key-stdin needs SERVER"},
+		{name: "empty key on stdin", args: []string{server.URL, "--api-key-stdin"}, input: "\n", wantErr: "API key is required"},
+		{name: "no terminal for the key", args: []string{server.URL}, wantErr: "no terminal to read the API key from; pipe it in with --api-key-stdin"},
+		{name: "invalid URL", args: []string{"openrelik.example.org", "--api-key-stdin"}, input: "good-key", wantErr: `invalid server URL "openrelik.example.org"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config.SetBaseDir(t.TempDir())
+			defer config.SetBaseDir("")
+			t.Setenv("OPENRELIK_SERVER_URL", "")
+			stdout, _, err := runAuth(t, tt.input, false, append([]string{"login"}, tt.args...)...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+				if _, err := config.LoadSettings(); err == nil {
+					t.Error("settings were saved despite the error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if want := "Logged in to " + tt.wantServer + " as analyst\n"; stdout != want {
+				t.Errorf("stdout = %q, want %q", stdout, want)
+			}
+			s, _ := config.LoadSettings()
+			c, _ := config.LoadCredentials()
+			if s.ActiveServer != tt.wantServer || c.APIKeys[tt.wantServer] != "good-key" {
+				t.Errorf("saved active server %q and keys %v", s.ActiveServer, c.APIKeys)
+			}
+		})
+	}
+}
+
+func TestAuthSwitchAndLogout(t *testing.T) {
+	const a, b, c = "http://a.example", "http://b.example", "http://c.example"
+
+	tests := []struct {
+		name       string
+		args       []string
+		input      string
+		terminal   bool
+		wantOut    string
+		wantStderr string
+		wantErr    string
+		wantActive string
+		wantSaved  []string // servers left in the settings, with their keys
+	}{
+		{name: "switch by number", args: []string{"switch", "3"}, wantOut: "Switched to " + c + "\n", wantActive: c, wantSaved: []string{a, b, c}},
+		{name: "switch by URL", args: []string{"switch", b + "/"}, wantOut: "Switched to " + b + "\n", wantActive: b, wantSaved: []string{a, b, c}},
+		{name: "switch to unknown server", args: []string{"switch", "http://d.example"}, wantErr: `no saved server "http://d.example"`, wantActive: a, wantSaved: []string{a, b, c}},
+		{name: "switch to invalid number", args: []string{"switch", "4"}, wantErr: "invalid choice 4: there are 3 saved servers", wantActive: a, wantSaved: []string{a, b, c}},
+		{name: "switch without a terminal", args: []string{"switch"}, wantErr: "give SERVER", wantActive: a, wantSaved: []string{a, b, c}},
+		{name: "switch interactively", args: []string{"switch"}, input: "2\n", terminal: true, wantOut: "Switched to " + b + "\n",
+			wantStderr: "Select a server:\n1) " + a + " [ACTIVE]\n2) " + b + "\n3) " + c + "\nEnter number: ", wantActive: b, wantSaved: []string{a, b, c}},
+		{name: "logout of a server", args: []string{"logout", "2"}, wantOut: "Logged out of " + b + "\n", wantActive: a, wantSaved: []string{a, c}},
+		{name: "logout of the active server", args: []string{"logout"}, wantOut: "Logged out of " + a + "\n",
+			wantStderr: "No server is active now; choose one with 'openrelik auth switch'.\n", wantActive: "", wantSaved: []string{b, c}},
+		{name: "logout of unknown server", args: []string{"logout", "http://d.example"}, wantErr: `no saved server "http://d.example"`, wantActive: a, wantSaved: []string{a, b, c}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config.SetBaseDir(t.TempDir())
+			defer config.SetBaseDir("")
+			t.Setenv("OPENRELIK_SERVER_URL", "")
+			config.SaveSettings(&config.Settings{ActiveServer: a, Servers: []config.ServerConfig{{URL: a}, {URL: b}, {URL: c}}})
+			config.SaveCredentials(&config.Credentials{APIKeys: map[string]string{a: "key-a", b: "key-b", c: "key-c"}})
+
+			stdout, stderr, err := runAuth(t, tt.input, tt.terminal, tt.args...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if stdout != tt.wantOut {
+				t.Errorf("stdout = %q, want %q", stdout, tt.wantOut)
+			}
+			if stderr != tt.wantStderr {
+				t.Errorf("stderr = %q, want %q", stderr, tt.wantStderr)
+			}
+
+			s, _ := config.LoadSettings()
+			creds, _ := config.LoadCredentials()
+			if s.ActiveServer != tt.wantActive {
+				t.Errorf("active server = %q, want %q", s.ActiveServer, tt.wantActive)
+			}
+			var saved []string
+			for _, srv := range s.Servers {
+				saved = append(saved, srv.URL)
+			}
+			if strings.Join(saved, ",") != strings.Join(tt.wantSaved, ",") || len(creds.APIKeys) != len(tt.wantSaved) {
+				t.Errorf("saved servers %v and keys %v, want %v", saved, creds.APIKeys, tt.wantSaved)
+			}
+			for _, srv := range tt.wantSaved {
+				if creds.APIKeys[srv] == "" {
+					t.Errorf("key for %s was removed", srv)
+				}
+			}
+		})
+	}
+}
+
+func TestAuthListAndOverride(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	const a, b = "http://a.example", "http://b.example"
+	config.SaveSettings(&config.Settings{ActiveServer: a, Servers: []config.ServerConfig{{URL: a}, {URL: b}}})
+	config.SaveCredentials(&config.Credentials{APIKeys: map[string]string{a: "key-a"}})
+
+	t.Run("JSON", func(t *testing.T) {
+		t.Setenv("OPENRELIK_SERVER_URL", "")
+		stdout, _, err := runAuth(t, "", false, "list", "--format", "json")
+		if err != nil {
+			t.Fatalf("Execute() failed: %v", err)
+		}
+		want := `[{"number":1,"url":"http://a.example","active":true,"api_key_saved":true},{"number":2,"url":"http://b.example","active":false,"api_key_saved":false}]`
+		if strings.Join(strings.Fields(stdout), "") != want {
+			t.Errorf("stdout = %s, want %s", stdout, want)
+		}
+	})
+
+	t.Run("override is shown", func(t *testing.T) {
+		t.Setenv("OPENRELIK_SERVER_URL", "http://env.example")
+		stdout, _, err := runAuth(t, "", false, "list")
+		if err != nil {
+			t.Fatalf("Execute() failed: %v", err)
+		}
+		if !strings.HasSuffix(stdout, "\nCommands use http://env.example instead while OPENRELIK_SERVER_URL is set.\n") {
+			t.Errorf("expected the override to be shown:\n%s", stdout)
+		}
+		_, stderr, err := runAuth(t, "", false, "switch", "2")
+		if err != nil || stderr != "Note: commands use http://env.example instead while OPENRELIK_SERVER_URL is set.\n" {
+			t.Errorf("expected switch to warn about the override, got %q, %v", stderr, err)
+		}
+	})
+
+	t.Run("no servers", func(t *testing.T) {
+		config.SetBaseDir(t.TempDir())
+		t.Setenv("OPENRELIK_SERVER_URL", "")
+		stdout, stderr, err := runAuth(t, "", false, "list")
+		if err != nil || stdout != "" || !strings.Contains(stderr, "No servers are saved") {
+			t.Errorf("got stdout %q, stderr %q, err %v", stdout, stderr, err)
+		}
+	})
+}
+
+func TestAuthServerFlag(t *testing.T) {
+	server := newMeServer(t, "good-key")
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	t.Setenv("OPENRELIK_SERVER_URL", "")
+
+	if _, _, err := runAuth(t, "good-key\n", false, "login", "--server", server.URL, "--api-key-stdin"); err != nil {
+		t.Fatalf("login --server failed: %v", err)
+	}
+	if _, _, err := runAuth(t, "good-key\n", false, "login", "--server", "http://other.example", "--api-key-stdin", server.URL); err == nil || !strings.Contains(err.Error(), "differ") {
+		t.Errorf("expected an error for a SERVER that differs from --server, got %v", err)
+	}
+	stdout, _, err := runAuth(t, "", false, "logout", "--server", server.URL+"/")
+	if err != nil || stdout != "Logged out of "+server.URL+"\n" {
+		t.Errorf("logout --server: stdout %q, err %v", stdout, err)
 	}
 }

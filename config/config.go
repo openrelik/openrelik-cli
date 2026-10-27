@@ -25,11 +25,13 @@ const (
 // ErrCacheMissing is returned when the workers cache file does not exist.
 var ErrCacheMissing = errors.New("workers cache does not exist")
 
-// ErrCacheStale is returned when the workers cache is older than the TTL.
+// ErrCacheStale is returned when the workers cache is older than the TTL, or
+// was saved for another server.
 var ErrCacheStale = errors.New("workers cache is stale")
 
 // workersCacheEntry is the on-disk representation of the workers cache.
 type workersCacheEntry struct {
+	Server  string             `json:"server"`
 	Workers []openrelik.Worker `json:"workers"`
 	SavedAt time.Time          `json:"saved_at"`
 }
@@ -54,14 +56,14 @@ func (c Credentials) String() string {
 	return "********"
 }
 
+// GetActiveServer returns the active server, or nil if none is active. It
+// never falls back to another saved server, so commands can't quietly talk
+// to a server the user didn't choose.
 func (s *Settings) GetActiveServer() *ServerConfig {
 	for i := range s.Servers {
 		if s.Servers[i].URL == s.ActiveServer {
 			return &s.Servers[i]
 		}
-	}
-	if len(s.Servers) > 0 {
-		return &s.Servers[0]
 	}
 	return nil
 }
@@ -196,9 +198,9 @@ func SaveCredentials(c *Credentials) error {
 	return saveAtomic(path, data)
 }
 
-// LoadWorkersCache reads the workers cache from disk. Returns ErrCacheMissing if the
-// cache file does not exist, or ErrCacheStale if it is older than workersCacheTTL.
-func LoadWorkersCache() ([]openrelik.Worker, error) {
+// readWorkersCache reads the workers cache from disk. It returns
+// ErrCacheMissing if the cache file does not exist.
+func readWorkersCache() (*workersCacheEntry, error) {
 	dir, err := GetConfigDir()
 	if err != nil {
 		return nil, err
@@ -215,19 +217,42 @@ func LoadWorkersCache() ([]openrelik.Worker, error) {
 	if err := json.Unmarshal(data, &entry); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal workers cache file %s: %w", path, err)
 	}
-	if time.Since(entry.SavedAt) > workersCacheTTL {
+	return &entry, nil
+}
+
+// LoadCachedWorkers returns the cached workers however old they are and
+// whichever server they came from, without contacting any server. Returns
+// ErrCacheMissing if there is no cache.
+func LoadCachedWorkers() ([]openrelik.Worker, error) {
+	entry, err := readWorkersCache()
+	if err != nil {
+		return nil, err
+	}
+	return entry.Workers, nil
+}
+
+// LoadWorkersCache reads the workers cached for server. Returns
+// ErrCacheMissing if the cache file does not exist, or ErrCacheStale if it is
+// older than workersCacheTTL or was saved for another server.
+func LoadWorkersCache(server string) ([]openrelik.Worker, error) {
+	entry, err := readWorkersCache()
+	if err != nil {
+		return nil, err
+	}
+	if entry.Server != server || time.Since(entry.SavedAt) > workersCacheTTL {
 		return nil, ErrCacheStale
 	}
 	return entry.Workers, nil
 }
 
-// SaveWorkersCache writes workers to the cache file with the current timestamp.
-func SaveWorkersCache(w []openrelik.Worker) error {
+// SaveWorkersCache writes the workers registered on server to the cache file
+// with the current timestamp.
+func SaveWorkersCache(server string, w []openrelik.Worker) error {
 	dir, err := EnsureConfigDir()
 	if err != nil {
 		return err
 	}
-	entry := workersCacheEntry{Workers: w, SavedAt: time.Now()}
+	entry := workersCacheEntry{Server: server, Workers: w, SavedAt: time.Now()}
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal workers cache: %w", err)
@@ -236,10 +261,11 @@ func SaveWorkersCache(w []openrelik.Worker) error {
 	return saveAtomic(path, data)
 }
 
-// LoadOrRefreshWorkersCache loads the workers cache. If the cache is missing or stale,
-// it calls refresh to fetch fresh data, saves it, and returns it.
-func LoadOrRefreshWorkersCache(ctx context.Context, refresh func(context.Context) ([]openrelik.Worker, error)) ([]openrelik.Worker, error) {
-	workers, err := LoadWorkersCache()
+// LoadOrRefreshWorkersCache loads the workers cached for server. If the cache
+// is missing or stale, it calls refresh to fetch fresh data, saves it, and
+// returns it.
+func LoadOrRefreshWorkersCache(ctx context.Context, server string, refresh func(context.Context) ([]openrelik.Worker, error)) ([]openrelik.Worker, error) {
+	workers, err := LoadWorkersCache(server)
 	if err == nil {
 		return workers, nil
 	}
@@ -250,7 +276,7 @@ func LoadOrRefreshWorkersCache(ctx context.Context, refresh func(context.Context
 	if err != nil {
 		return nil, err
 	}
-	_ = SaveWorkersCache(workers) // best-effort; callers get the data regardless
+	_ = SaveWorkersCache(server, workers) // best-effort; callers get the data regardless
 	return workers, nil
 }
 

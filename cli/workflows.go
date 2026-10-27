@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -389,8 +390,10 @@ func newWorkflowDownloadCmd() *cobra.Command {
 		Short: "Download the output files of a workflow",
 		Long: `Download the output files of a workflow, as 'run' does when it finishes.
 
-By default, only the output files of the last task are downloaded; use
---all to download the output files of every task. For a workflow that is
+By default, only the output files of the final tasks are downloaded: the
+tasks with no tasks after them, such as the end of a chain or each of the
+tasks run in parallel at the end. Use --all to download the output files of
+every task. For a workflow that is
 still running, only the files produced so far are downloaded.
 
 Files are saved in DIRECTORY, or in the current directory if it is omitted;
@@ -428,6 +431,9 @@ nothing is downloaded.`,
 				policy = "all"
 			}
 			saved, _, err := util.DownloadResults(cmd.Context(), client, wID, policy, nil, dir, taskFolders, outputFormat, !quiet)
+			if errors.Is(err, util.ErrFinalTasksUnknown) {
+				return fmt.Errorf("%w; use --all to download the results of every task", err)
+			}
 			if err != nil {
 				return err
 			}

@@ -194,7 +194,15 @@ func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID i
 	tasksToDownload := []openrelik.Task{}
 	allTasks := FlattenTasks(fullWorkflow.Tasks)
 
-	for i, task := range allTasks {
+	var final map[string]bool
+	if policy == "final" {
+		var err error
+		if final, err = FinalTasks(fullWorkflow.SpecJSON, allTasks); err != nil {
+			return nil, fullWorkflow, err
+		}
+	}
+
+	for _, task := range allTasks {
 		shouldDownload := false
 
 		// Check per-task preference first
@@ -205,7 +213,7 @@ func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID i
 			if policy == "all" {
 				shouldDownload = true
 			} else if policy == "final" {
-				shouldDownload = i == len(allTasks)-1
+				shouldDownload = final[task.UUID]
 			}
 		}
 

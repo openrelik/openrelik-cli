@@ -16,9 +16,12 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -272,4 +275,55 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 			t.Errorf("Expected OutputDir /tmp/shorthand, got %s", meta.OutputDir)
 		}
 	})
+}
+
+func TestWorkerCommand(t *testing.T) {
+	for task, want := range map[string]string{
+		"openrelik-worker-strings.tasks.strings": "strings",
+		"plain":                                  "plain",
+	} {
+		if got := WorkerCommand(openrelik.Worker{TaskName: task}); got != want {
+			t.Errorf("WorkerCommand(%q) = %q, want %q", task, got, want)
+		}
+	}
+}
+
+func TestFinalTasks(t *testing.T) {
+	tasks := []openrelik.Task{{UUID: "a"}, {UUID: "b"}, {UUID: "c"}, {UUID: "d"}}
+	spec := func(s string) *string { return &s }
+	tests := []struct {
+		name    string
+		spec    *string
+		want    []string
+		wantErr bool
+	}{
+		{name: "chain", spec: spec(`{"workflow": {"tasks": [{"uuid": "a", "tasks": [{"uuid": "b", "tasks": [{"uuid": "c"}]}]}]}}`), want: []string{"c"}},
+		{name: "parallel", spec: spec(`{"workflow": {"tasks": [{"uuid": "a"}, {"uuid": "b"}, {"uuid": "c"}]}}`), want: []string{"a", "b", "c"}},
+		{name: "chain then parallel", spec: spec(`{"workflow": {"tasks": [{"uuid": "a", "tasks": [{"uuid": "b"}, {"uuid": "c", "tasks": [{"uuid": "d"}]}]}]}}`), want: []string{"b", "d"}},
+		{name: "no spec", wantErr: true},
+		{name: "invalid spec", spec: spec(`{`), wantErr: true},
+		{name: "spec of other tasks", spec: spec(`{"workflow": {"tasks": [{"uuid": "x"}]}}`), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := FinalTasks(tt.spec, tasks)
+			if tt.wantErr {
+				if !errors.Is(err, ErrFinalTasksUnknown) {
+					t.Fatalf("expected ErrFinalTasksUnknown, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var uuids []string
+			for u := range got {
+				uuids = append(uuids, u)
+			}
+			sort.Strings(uuids)
+			if strings.Join(uuids, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("FinalTasks() = %v, want %v", uuids, tt.want)
+			}
+		})
+	}
 }

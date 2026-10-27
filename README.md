@@ -80,19 +80,23 @@ This section provides a detailed reference of the CLI commands and options.
 
 ### Global Flags
 
-These flags modify output behavior for all commands:
+These flags apply to all commands:
 
-*   `--format`: Set output styling to `human`, `json`, or `verbose`.
+*   `--format`: Set output styling to `human`, `json`, or `verbose`. Any other value is an error.
 *   `--quiet`, `-q`: Suppress all output.
+*   `--server`: Use this server instead of the active one, with the API key saved for it (or `OPENRELIK_API_KEY`).
+
+Progress bars and colours are only shown when stderr is a terminal. Set `NO_COLOR` to turn colours off; with `TERM=dumb`, progress is written as one line per transfer.
 
 ### Authentication (`auth`)
 
-Configure credentials and active server connections. The CLI prioritizes `OPENRELIK_SERVER_URL` and `OPENRELIK_API_KEY` environment variables over local configuration settings.
+Configure credentials and active server connections. The server is taken from `--server`, then `OPENRELIK_SERVER_URL`, then the active server. The API key is taken from `OPENRELIK_API_KEY`, then the key saved for that server. There is no flag for the API key, since command lines show up in process lists and shell history.
 
-*   `auth login`: Prompt for server URL and API key, saving them to `~/.openrelik/config.json`.
-*   `auth status`: Show connection status and the active server.
-*   `auth list`: List all configured servers.
-*   `auth switch`: Change the active server.
+*   `auth login [SERVER]`: Check an API key with the server and save it to `~/.openrelik/`. Prompts for anything missing; use `--api-key-stdin` to pipe the key in from a script.
+*   `auth status`: Show which server and API key commands use, and check the login.
+*   `auth list`: List the saved servers.
+*   `auth switch [SERVER]`: Change the active server, by URL or by number from `auth list`.
+*   `auth logout [SERVER]`: Remove a saved server and its API key (the active server by default).
 
 #### Examples
 
@@ -195,7 +199,7 @@ openrelik file cat -c 512 "Case A/evidence/disk.E01" | xxd
 
 Inspect processing workers.
 
-*   `worker list`: List registered workers and update the local cache at `~/.openrelik/workers_cache.json`.
+*   `worker list`: List registered workers, with the `run` subcommand for each, and update the local cache at `~/.openrelik/workers_cache.json`.
 
 #### Example
 
@@ -222,7 +226,7 @@ openrelik workflow create --file 10 --template 5 --run
 
 ### Dynamic Worker Execution (`run`)
 
-Run workers on files. The CLI reads the local worker cache to generate subcommands dynamically. Inputs can be server-side file IDs or local paths, which the CLI uploads automatically before running the worker.
+Run workers on files. The CLI generates a subcommand for each worker from the local worker cache, which is updated when a workflow starts, when `run --help` is shown, or with `worker list`. When a workflow finishes, the output files of its final tasks are downloaded: the end of a chain, or each worker run with `--and`. Inputs can be server-side file IDs or local paths, which the CLI uploads automatically before running the worker.
 
 *   `run <worker_name> <input>`: Run a specific worker on an input.
 *   Use `--then` to chain workers sequentially (passing output from one to the next).

@@ -832,6 +832,25 @@ func TestDownloadCmd(t *testing.T) {
 		}
 	})
 
+	t.Run("stdout is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		wd, _ := os.Getwd()
+		os.Chdir(dir)
+		defer os.Chdir(wd)
+
+		root := NewRootCmd()
+		root.SetOut(new(bytes.Buffer))
+		root.SetErr(new(bytes.Buffer))
+		root.SetArgs([]string{"download", "789", "-"})
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "use 'openrelik file cat 789' instead") {
+			t.Errorf("expected an error pointing to file cat, got %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "-")); err == nil {
+			t.Error("a file named - was created")
+		}
+	})
+
 	t.Run("non-existent folder", func(t *testing.T) {
 		root := NewRootCmd()
 		buf := new(bytes.Buffer)

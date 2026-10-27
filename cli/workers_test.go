@@ -38,7 +38,7 @@ func TestWorkerListCmd(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintln(w, `[
 				{
-					"task_name": "test-task",
+					"task_name": "openrelik-worker-test.tasks.test_task",
 					"queue_name": "test-queue",
 					"display_name": "Test Task",
 					"description": "A test task"
@@ -71,6 +71,8 @@ func TestWorkerListCmd(t *testing.T) {
 
 	output := buf.String()
 	expectedFields := []string{
+		"COMMAND",
+		"test_task ",
 		"Test Task",
 		"A test task",
 	}

@@ -15,15 +15,13 @@
 package cli
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
-	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
 
@@ -81,14 +79,7 @@ question.`,
 			}
 
 			// Load workers from cache or API
-			workers, err := config.LoadOrRefreshWorkersCache(ctx, func(ctx context.Context) ([]openrelik.Worker, error) {
-				client, err := newClient()
-				if err != nil {
-					return nil, err
-				}
-				ws, _, err := client.Workers().Registered(ctx)
-				return ws, err
-			})
+			workers, err := loadWorkers(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to load workers: %w", err)
 			}
@@ -138,8 +129,7 @@ question.`,
 					return err
 				}
 				if !confirmed {
-					fmt.Fprintln(cmd.ErrOrStderr(), "Installation cancelled.")
-					return nil
+					return errors.New("cancelled; the skill was not installed")
 				}
 			}
 

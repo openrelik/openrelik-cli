@@ -122,7 +122,7 @@ func TestGenerateSkillFile(t *testing.T) {
 func TestSkillInstallConfirmation(t *testing.T) {
 	config.SetBaseDir(t.TempDir())
 	defer config.SetBaseDir("")
-	if err := config.SaveWorkersCache([]openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+	if err := config.SaveWorkersCache("", []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,7 +137,7 @@ func TestSkillInstallConfirmation(t *testing.T) {
 		{name: "no terminal", wantErr: "No terminal to ask on; use --yes to confirm."},
 		{name: "no terminal with --yes", args: []string{"--yes"}, wantInstall: true},
 		{name: "terminal, confirmed", terminal: true, input: "y\n", wantInstall: true},
-		{name: "terminal, declined", terminal: true, input: "n\n"},
+		{name: "terminal, declined", terminal: true, input: "n\n", wantErr: "cancelled; the skill was not installed"},
 		{name: "unknown harness with a directory", args: []string{"--yes", "--harness", "foo"}, wantErr: "unknown harness: foo"},
 	}
 	for _, tt := range tests {

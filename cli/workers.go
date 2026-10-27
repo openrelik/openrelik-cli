@@ -58,7 +58,7 @@ This command also refreshes the local worker cache used to generate
 				return err
 			}
 
-			if err := config.SaveWorkersCache(workers); err != nil {
+			if err := config.SaveWorkersCache(resolveCredentials().ServerURL, workers); err != nil {
 				return err
 			}
 

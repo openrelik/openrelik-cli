@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/openrelik/openrelik-cli/config"
@@ -13,10 +14,26 @@ import (
 
 var (
 	serverURL    string
-	apiKey       string
 	outputFormat string
 	quiet        bool
 )
+
+// outputFormats are the values --format accepts.
+var outputFormats = []string{"human", "json", "verbose"}
+
+// formatValue is the --format flag. It rejects unknown formats while the
+// flags are parsed, so a typo fails before any request is made.
+type formatValue struct{ p *string }
+
+func (f formatValue) String() string { return *f.p }
+func (f formatValue) Type() string   { return "string" }
+func (f formatValue) Set(s string) error {
+	if !slices.Contains(outputFormats, s) {
+		return fmt.Errorf("must be one of %s", strings.Join(outputFormats, ", "))
+	}
+	*f.p = s
+	return nil
+}
 
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -31,7 +48,9 @@ func NewRootCmd() *cobra.Command {
 
 	cmd.CompletionOptions.DisableDefaultCmd = true
 
-	cmd.PersistentFlags().StringVar(&outputFormat, "format", "human", "Output format (human, json, verbose)")
+	serverURL, outputFormat = "", "human"
+	cmd.PersistentFlags().StringVar(&serverURL, "server", "", "Server URL to use instead of the active one (overrides OPENRELIK_SERVER_URL)")
+	cmd.PersistentFlags().Var(formatValue{&outputFormat}, "format", "Output format ("+strings.Join(outputFormats, ", ")+")")
 	cmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress all output")
 
 	cmd.AddCommand(newAuthCmd())
@@ -94,9 +113,11 @@ type credentials struct {
 	ActiveServer string
 }
 
-// resolveCredentials finds the server and API key in order of precedence:
-// command-line flag, environment variable, then the config files. The key
-// stored for a server is used whichever way the server was chosen.
+// resolveCredentials finds the server in order of precedence: the --server
+// flag, OPENRELIK_SERVER_URL, then the active server in the config files.
+// The API key comes from OPENRELIK_API_KEY or, failing that, the key saved
+// for the server, whichever way the server was chosen. There is no flag for
+// the key, since command lines show up in process lists and shell history.
 func resolveCredentials() credentials {
 	var c credentials
 	if settings, _ := config.LoadSettings(); settings != nil {
@@ -106,17 +127,15 @@ func resolveCredentials() credentials {
 	}
 	switch {
 	case serverURL != "":
-		c.ServerURL, c.ServerSource = serverURL, "command line"
+		c.ServerURL, c.ServerSource = strings.TrimRight(serverURL, "/"), "--server"
 	case os.Getenv("OPENRELIK_SERVER_URL") != "":
-		c.ServerURL, c.ServerSource = os.Getenv("OPENRELIK_SERVER_URL"), "OPENRELIK_SERVER_URL"
+		c.ServerURL, c.ServerSource = strings.TrimRight(os.Getenv("OPENRELIK_SERVER_URL"), "/"), "OPENRELIK_SERVER_URL"
 	case c.ActiveServer != "":
 		c.ServerURL = c.ActiveServer
 		c.ServerSource, _ = config.SettingsPath()
 	}
 
 	switch {
-	case apiKey != "":
-		c.APIKey, c.APIKeySource = apiKey, "command line"
 	case os.Getenv("OPENRELIK_API_KEY") != "":
 		c.APIKey, c.APIKeySource = os.Getenv("OPENRELIK_API_KEY"), "OPENRELIK_API_KEY"
 	case c.ServerURL != "":
@@ -136,7 +155,7 @@ func resolveCredentials() credentials {
 var NewAPIClient = func() (*openrelik.Client, error) {
 	c := resolveCredentials()
 	if c.ServerURL == "" {
-		return nil, fmt.Errorf("server URL is required (use OPENRELIK_SERVER_URL env var, or run 'openrelik auth login')")
+		return nil, fmt.Errorf("server URL is required (use --server or the OPENRELIK_SERVER_URL env var, or run 'openrelik auth login')")
 	}
 	if c.APIKey == "" {
 		return nil, fmt.Errorf("API key is required (use OPENRELIK_API_KEY env var, or run 'openrelik auth login')")

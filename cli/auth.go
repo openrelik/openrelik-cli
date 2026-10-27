@@ -89,7 +89,7 @@ saved login.`,
 				server = strings.TrimSpace(line)
 			}
 			if server == "" {
-				return fmt.Errorf("server URL is required")
+				return usageErrorf("server URL is required")
 			}
 			server, err = normalizeServerURL(server)
 			if err != nil {
@@ -299,10 +299,12 @@ to ask on, the command fails instead. Use 'auth login' to add a server.`,
 }
 
 // normalizeServerURL checks that server is an http or https URL and drops a
-// trailing slash, so the same server isn't saved twice.
+// trailing slash, so the same server isn't saved twice. A path is allowed,
+// for a server under a sub-path, but a user, query or fragment is not.
 func normalizeServerURL(server string) (string, error) {
 	u, err := url.Parse(server)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || strings.ContainsAny(server, "?#") {
 		return "", usageErrorf("invalid server URL %q: give a URL such as https://openrelik.example.org", server)
 	}
 	return strings.TrimRight(server, "/"), nil
@@ -350,9 +352,6 @@ func loadCredentials() (*config.Credentials, error) {
 	return creds, nil
 }
 
-// warnServerOverride tells the user on stderr when an environment variable
-// or flag overrides the active server they just chose, so commands won't
-// use it.
 // serverArgs lets the global --server flag stand in for the SERVER argument
 // of login, logout and switch, so it isn't silently ignored there.
 func serverArgs(args []string) ([]string, error) {
@@ -368,6 +367,9 @@ func serverArgs(args []string) ([]string, error) {
 	return args, nil
 }
 
+// warnServerOverride tells the user on stderr when an environment variable
+// or flag overrides the active server they just chose, so commands won't
+// use it.
 func warnServerOverride(cmd *cobra.Command) {
 	c := resolveCredentials()
 	if quiet || c.ServerURL == "" || c.ServerURL == c.ActiveServer {

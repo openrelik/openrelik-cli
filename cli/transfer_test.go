@@ -71,6 +71,9 @@ func newUploadServer(t *testing.T) *uploadServer {
 					}
 				case len(parts) == 4 && parts[2] == "files" && s.info[parts[3]] != "":
 					fmt.Fprint(w, s.info[parts[3]])
+				case len(parts) == 4 && parts[2] == "files":
+					// Uploaded files the server hasn't hashed yet.
+					fmt.Fprintf(w, `{"id": %s}`, parts[3])
 				default:
 					w.WriteHeader(http.StatusNotFound)
 				}

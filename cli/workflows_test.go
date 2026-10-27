@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -581,5 +582,39 @@ func TestWorkflowWait(t *testing.T) {
 				t.Errorf("status requests = %d, want %d", *polls, tt.wantPolls)
 			}
 		})
+	}
+}
+
+// TestWorkflowWaitInterruptedAfterFinish checks that Ctrl-C while fetching
+// the result of a finished workflow still says how it ended.
+func TestWorkflowWaitInterruptedAfterFinish(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workflows/99":
+			if gets++; gets > 1 {
+				cancel()
+				<-r.Context().Done()
+				return
+			}
+			fmt.Fprint(w, `{"id": 99, "folder": {"id": 9}, "tasks": [{"id": 1, "uuid": "u-strings", "display_name": "Strings"}]}`)
+		case "/api/v1/folders/9/workflows/99/status/":
+			fmt.Fprint(w, `{"status": "SUCCESS", "tasks": [{"id": 1, "uuid": "u-strings", "display_name": "Strings", "status_short": "SUCCESS"}]}`)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+	root := NewRootCmd()
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"workflow", "wait", "99"})
+	err := root.ExecuteContext(ctx)
+	if err == nil || !strings.Contains(err.Error(), "interrupted; workflow 99 had finished (SUCCESS)") {
+		t.Errorf("expected the finished status, got %v", err)
 	}
 }

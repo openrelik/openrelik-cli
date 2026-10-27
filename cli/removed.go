@@ -30,7 +30,7 @@ func removedCmd(use, replacement, note string, aliases ...string) *cobra.Command
 			if note != "" {
 				msg += "\n\n" + note
 			}
-			return errors.New(msg)
+			return &usageError{errors.New(msg)}
 		},
 	}
 }
@@ -45,7 +45,7 @@ func removedFlag(cmd *cobra.Command, name, replacement string) {
 	validate := cmd.Args
 	cmd.Args = func(c *cobra.Command, args []string) error {
 		if c.Flags().Changed(name) {
-			return fmt.Errorf("'%s --%s' was removed. Use instead:\n\n  %s", c.CommandPath(), name, replacement)
+			return usageErrorf("'%s --%s' was removed. Use instead:\n\n  %s", c.CommandPath(), name, replacement)
 		}
 		if validate == nil {
 			return nil

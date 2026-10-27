@@ -71,8 +71,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newSkillCmd())
 
 	requireKnownSubcommands(cmd)
-	markUsageErrors(cmd)
-	friendlyErrors(cmd)
+	wrapErrors(cmd)
 	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
 		return &usageError{fmt.Errorf("%w\n\nRun '%s --help' for usage.", err, c.CommandPath())}
 	})
@@ -166,6 +165,12 @@ var NewAPIClient = func() (*openrelik.Client, error) {
 	c := resolveCredentials()
 	if c.ServerURL == "" {
 		return nil, &credentialsError{"server URL is required (use --server or the OPENRELIK_SERVER_URL env var, or run 'openrelik auth login')"}
+	}
+	// Saved servers were checked by 'auth login'.
+	if c.ServerSource == "--server" || c.ServerSource == "OPENRELIK_SERVER_URL" {
+		if _, err := normalizeServerURL(c.ServerURL); err != nil {
+			return nil, fmt.Errorf("%w (from %s)", err, c.ServerSource)
+		}
 	}
 	if c.APIKey == "" {
 		return nil, &credentialsError{"API key is required (use OPENRELIK_API_KEY env var, or run 'openrelik auth login')"}

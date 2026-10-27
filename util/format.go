@@ -325,8 +325,8 @@ func FprintTable(w io.Writer, s interface{}) {
 				str = fmt.Sprintf("%v", fieldVal.Interface())
 			}
 
-			if headers[j] == "DESCRIPTION" && len(str) > 60 {
-				str = str[:57] + "..."
+			if headers[j] == "DESCRIPTION" {
+				str = Truncate(str, 60)
 			}
 
 			fmt.Fprint(tw, str)
@@ -337,6 +337,19 @@ func FprintTable(w io.Writer, s interface{}) {
 		fmt.Fprintln(tw)
 	}
 	tw.Flush()
+}
+
+// Truncate shortens s to at most n characters, ending it with "..." if it
+// was cut. It counts runes, so a multi-byte character is never split.
+func Truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 3 {
+		return string(r[:n])
+	}
+	return string(r[:n-3]) + "..."
 }
 
 func FormatBytes(b int64) string {

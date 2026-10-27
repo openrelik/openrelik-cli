@@ -687,3 +687,84 @@ func TestRunServerPathInput(t *testing.T) {
 		t.Errorf("dry run: %v\n%s", err, out)
 	}
 }
+
+// TestRunReaddedWorkerErrors checks that worker commands added again after
+// the root was built still describe failed requests in plain words.
+func TestRunReaddedWorkerErrors(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	workers := []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}
+	if err := config.SaveWorkersCache(server.URL, workers); err != nil {
+		t.Fatal(err)
+	}
+
+	root := NewRootCmd()
+	runCmd, _, err := root.Find([]string{"run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addWorkerCmds(runCmd, workers)
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"run", "strings", "--download", "none", "123"})
+	err = root.Execute()
+	if err == nil || strings.Contains(err.Error(), "404 Not Found") || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected a plain-words not-found error, got %v", err)
+	}
+}
+
+// TestRunGlobalFlagsAfterWorker checks that global flags after the worker
+// are read before they're needed, and don't take a worker's own flags.
+func TestRunGlobalFlagsAfterWorker(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/taskqueue/tasks/registered" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		requests++
+		fmt.Fprint(w, `[{"task_name": "openrelik-worker-strings.tasks.strings", "display_name": "Strings"},
+			{"task_name": "openrelik-worker-yara.tasks.yara", "display_name": "Yara"}]`)
+	}))
+	defer server.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", closed.URL)
+	if err := config.SaveWorkersCache(closed.URL, []openrelik.Worker{
+		{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"},
+		{TaskName: "openrelik-worker-fmt.tasks.fmt", DisplayName: "Fmt",
+			TaskConfig: []openrelik.TaskConfig{{Name: "format", Type: "string"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) (string, string, error) {
+		root := NewRootCmd()
+		out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+		root.SetOut(out)
+		root.SetErr(errOut)
+		root.SetArgs(args)
+		err := root.Execute()
+		return out.String(), errOut.String(), err
+	}
+
+	// --format belongs to the worker that defines it.
+	out, errOut, err := run("run", "--dry-run", "fmt", "--format", "json", "123")
+	if err != nil || outputFormat != "human" || !strings.Contains(errOut, "Dry run:") || !strings.Contains(out, `"value": "json"`) {
+		t.Fatalf("outputFormat %q, err %v:\n%s\n%s", outputFormat, err, errOut, out)
+	}
+
+	// The unknown worker is looked up on the server given at the end.
+	out, _, err = run("run", "--dry-run", "strings", "--then", "yara", "123", "--server", server.URL)
+	if err != nil || requests != 1 || !strings.Contains(out, "openrelik-worker-yara.tasks.yara") {
+		t.Fatalf("made %d requests, err %v:\n%s", requests, err, out)
+	}
+}

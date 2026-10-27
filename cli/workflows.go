@@ -253,7 +253,7 @@ doesn't stop the workflow either.`,
 				defer cancel()
 			}
 			monitor := util.NewWorkflowMonitor(client, workflow, names, uuids, nil, util.IsInteractiveTTY() && !quiet, !quiet)
-			_, waitErr := monitor.Monitor(ctx)
+			last, waitErr := monitor.Monitor(ctx)
 			switch {
 			case cmd.Context().Err() != nil:
 				return fmt.Errorf("interrupted; workflow %d keeps running on the server", wID)
@@ -265,11 +265,15 @@ doesn't stop the workflow either.`,
 
 			// Fetch the workflow again for the output files the tasks
 			// produced while we waited.
+			var status *openrelik.WorkflowStatus
 			workflow, _, err = client.Workflows().Get(cmd.Context(), wID)
-			if err != nil {
-				return err
+			if err == nil {
+				status, err = workflowStatus(cmd.Context(), client, workflow)
 			}
-			status, err := workflowStatus(cmd.Context(), client, workflow)
+			if err != nil && cmd.Context().Err() != nil && last != nil {
+				// Interrupted after the wait was over: say how it ended.
+				return fmt.Errorf("interrupted; workflow %d had finished (%s); see 'openrelik workflow status %d'", wID, last.Status, wID)
+			}
 			if err != nil {
 				return err
 			}

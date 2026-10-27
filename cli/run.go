@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/openrelik/openrelik-cli/util"
 	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func newRunCmd() *cobra.Command {
@@ -142,8 +144,6 @@ A dry run doesn't contact the server, and uses the cached list of workers.`,
 // list its workers.
 const helpRefreshTimeout = 5 * time.Second
 
-// checkRemovedRunFlags fails if a removed flag of 'run' is used, either
-// before the worker (parsed by 'run') or among the worker's own arguments.
 // serverPathResolver resolves the inputs of 'run' that are paths of files
 // on the server.
 func serverPathResolver(client *openrelik.Client) util.ServerPathResolver {
@@ -157,6 +157,8 @@ func serverPathResolver(client *openrelik.Client) util.ServerPathResolver {
 	}
 }
 
+// checkRemovedRunFlags fails if a removed flag of 'run' is used, either
+// before the worker (parsed by 'run') or among the worker's own arguments.
 func checkRemovedRunFlags(cmd *cobra.Command, args []string) error {
 	used := cmd.Flags().Changed("no-download")
 	for _, arg := range args {
@@ -174,7 +176,9 @@ func checkRemovedRunFlags(cmd *cobra.Command, args []string) error {
 func addWorkerCmds(runCmd *cobra.Command, workers []openrelik.Worker) {
 	runCmd.RemoveCommand(runCmd.Commands()...)
 	for _, worker := range workers {
-		runCmd.AddCommand(createWorkerCmd(worker, workers))
+		c := createWorkerCmd(worker, workers)
+		wrapErrors(c)
+		runCmd.AddCommand(c)
 	}
 }
 
@@ -199,6 +203,34 @@ func loadWorkers(ctx context.Context) ([]openrelik.Worker, error) {
 	return config.LoadOrRefreshWorkersCache(ctx, resolveCredentials().ServerURL, fetchWorkers)
 }
 
+// parseGlobalFlags sets the global flags (--server, --format, --quiet,
+// --debug) given among the arguments of worker commands, which Cobra
+// doesn't parse. A flag that a segment's worker defines itself belongs to
+// the worker there.
+func parseGlobalFlags(root *cobra.Command, segments [][]string, workers []openrelik.Worker) {
+	for _, segment := range segments {
+		if len(segment) == 0 {
+			continue
+		}
+		own := map[string]bool{}
+		if w := util.FindWorker(segment[0], workers); w != nil {
+			for _, cfg := range w.TaskConfig {
+				own[cfg.Name] = true
+			}
+		}
+		fs := pflag.NewFlagSet(segment[0], pflag.ContinueOnError)
+		fs.ParseErrorsWhitelist.UnknownFlags = true
+		fs.SetOutput(io.Discard)
+		root.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+			if !own[f.Name] {
+				fs.AddFlag(f)
+			}
+		})
+		fs.Usage = func() {}
+		_ = fs.Parse(segment[1:]) // worker flags are checked when the spec is built
+	}
+}
+
 func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:                util.WorkerCommand(worker) + " <INPUT>...",
@@ -214,6 +246,30 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			segments, delimiter, err := util.SliceArgs(cmd.Name(), args, "--then", "--and")
 			if err != nil {
 				return err
+			}
+
+			// Global flags may follow the worker, so read them before
+			// anything depends on them, such as the server to ask for
+			// workers.
+			parseGlobalFlags(cmd.Root(), segments, allWorkers)
+
+			// A worker registered since the cache was saved isn't known
+			// yet; update the list once.
+			for _, segment := range segments {
+				if len(segment) == 0 || util.FindWorker(segment[0], allWorkers) != nil {
+					continue
+				}
+				workers, err := fetchWorkers(cmd.Context())
+				if err != nil {
+					return fmt.Errorf("unknown worker %q, and the list of workers could not be updated: %w", segment[0], err)
+				}
+				allWorkers = workers
+				break
+			}
+			for _, segment := range segments {
+				if len(segment) > 0 && util.FindWorker(segment[0], allWorkers) == nil {
+					return usageErrorf("unknown worker %q (see 'openrelik worker list')", segment[0])
+				}
 			}
 
 			// Check if help was requested in ANY segment.
@@ -259,6 +315,10 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			spec, positionalArgs, taskDownloadPrefs, meta, err := util.BuildWorkflowSpec(cmd.Parent(), segments, delimiter, allWorkers, createWorkerCmd)
 			if err != nil {
 				return err
+			}
+
+			if len(positionalArgs) == 0 {
+				return usageErrorf("no inputs provided (file IDs, local files or server paths)")
 			}
 
 			// Use resolved global flags from BuildWorkflowSpec
@@ -321,10 +381,6 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			fileIDs, totalUploaded, err := util.ResolveInputs(cmd.Context(), client, serverPathResolver(client), positionalArgs, showProgress, meta.UploadFolderID, meta.UploadFolderName)
 			if err != nil {
 				return err
-			}
-
-			if len(fileIDs) == 0 {
-				return fmt.Errorf("no inputs provided (file IDs, local files or server paths)")
 			}
 
 			startTime := time.Now()

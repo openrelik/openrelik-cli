@@ -10,15 +10,41 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/openrelik/openrelik-cli/util"
 	"github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
 )
+
+// errorsWrapped is the annotation of commands that wrapErrors has already
+// handled, such as the worker commands that 'run' adds while running.
+const errorsWrapped = "openrelik:errors-wrapped"
+
+// wrapErrors applies markUsageErrors and friendlyErrors to every command in
+// the tree, and marks them so they aren't wrapped twice.
+func wrapErrors(cmd *cobra.Command) {
+	markUsageErrors(cmd)
+	friendlyErrors(cmd)
+	markErrorsWrapped(cmd)
+}
+
+func markErrorsWrapped(cmd *cobra.Command) {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	cmd.Annotations[errorsWrapped] = "true"
+	for _, c := range cmd.Commands() {
+		markErrorsWrapped(c)
+	}
+}
 
 // friendlyErrors makes every command in the tree describe failed API
 // requests in plain words, e.g. "file 999999 not found" instead of
 // "openrelik: GET http://…/api/v1/files/999999: 404 Not Found: File not
 // found.". The raw form is kept with --debug.
 func friendlyErrors(cmd *cobra.Command) {
+	if cmd.Annotations[errorsWrapped] != "" {
+		return
+	}
 	if run := cmd.RunE; run != nil {
 		cmd.RunE = func(cmd *cobra.Command, args []string) error {
 			err := run(cmd, args)
@@ -191,12 +217,16 @@ func (e *credentialsError) Error() string { return e.msg }
 // markUsageErrors makes argument and flag errors of every command in the
 // tree usage errors.
 func markUsageErrors(cmd *cobra.Command) {
+	if cmd.Annotations[errorsWrapped] != "" {
+		return
+	}
 	if args := cmd.Args; args != nil {
 		cmd.Args = func(cmd *cobra.Command, a []string) error {
-			if err := args(cmd, a); err != nil {
-				return &usageError{err}
+			err := args(cmd, a)
+			if err == nil || errors.As(err, new(*usageError)) {
+				return err
 			}
-			return nil
+			return &usageError{err}
 		}
 	}
 	for _, c := range cmd.Commands() {
@@ -222,12 +252,13 @@ var cobraUsageErrors = []string{
 // exitCode returns the exit status for an error returned by a command.
 func exitCode(err error) int {
 	var usage *usageError
+	var input *util.InputError
 	var notFound notFoundError
 	var creds *credentialsError
 	var apiErr *openrelik.Error
 	var urlErr *url.Error
 	switch {
-	case errors.As(err, &usage):
+	case errors.As(err, &usage), errors.As(err, &input):
 		return exitUsage
 	case errors.As(err, &notFound):
 		return exitNotFound

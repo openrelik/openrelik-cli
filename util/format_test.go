@@ -220,3 +220,21 @@ func TestFormatTime(t *testing.T) {
 		t.Errorf("FormatTimeWithAge() = %q, want %q", got, want)
 	}
 }
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"short", 10, "short"},
+		{"exactly10!", 10, "exactly10!"},
+		{"a longer description", 10, "a longe..."},
+		{"åäöåäöåäöåäö", 10, "åäöåäöå..."},
+	}
+	for _, tt := range tests {
+		if got := Truncate(tt.s, tt.n); got != tt.want {
+			t.Errorf("Truncate(%q, %d) = %q, want %q", tt.s, tt.n, got, tt.want)
+		}
+	}
+}

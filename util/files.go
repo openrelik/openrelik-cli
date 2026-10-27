@@ -49,6 +49,16 @@ func CheckInputs(args []string) error {
 	return nil
 }
 
+// InputError is an input to 'run' that is neither a file ID, a local file
+// nor a server path. It is a mistake in the command line.
+type InputError struct{ msg string }
+
+func (e *InputError) Error() string { return e.msg }
+
+func inputErrorf(format string, a ...any) error {
+	return &InputError{fmt.Sprintf(format, a...)}
+}
+
 // inputKind is how an input to 'run' is read.
 type inputKind int
 
@@ -76,10 +86,10 @@ func classifyInput(arg string) (input, error) {
 	if fileIDPattern.MatchString(arg) {
 		id, err := strconv.Atoi(arg)
 		if err != nil || id == 0 {
-			return input{}, fmt.Errorf("invalid file ID: %s", arg)
+			return input{}, inputErrorf("invalid file ID: %s", arg)
 		}
 		if statErr == nil && !info.IsDir() {
-			return input{}, fmt.Errorf("%q is both a file ID and a local file\nUse ./%s to upload the local file, or run from a directory without it to use file %d.", arg, arg, id)
+			return input{}, inputErrorf("%q is both a file ID and a local file\nUse ./%s to upload the local file, or run from a directory without it to use file %d.", arg, arg, id)
 		}
 		return input{kind: inputID, id: id}, nil
 	}
@@ -87,11 +97,11 @@ func classifyInput(arg string) (input, error) {
 	case os.IsNotExist(statErr) && strings.Contains(arg, "/") && !strings.HasSuffix(arg, "/"):
 		return input{kind: inputServer, path: arg}, nil
 	case os.IsNotExist(statErr):
-		return input{}, fmt.Errorf("%q is neither a file ID, a local file nor a server path (FOLDER/NAME)", arg)
+		return input{}, inputErrorf("%q is neither a file ID, a local file nor a server path (FOLDER/NAME)", arg)
 	case statErr != nil:
 		return input{}, fmt.Errorf("failed to stat file %s: %w", arg, statErr)
 	case info.IsDir():
-		return input{}, fmt.Errorf("%q is a directory; give files or file IDs (upload directories with 'openrelik upload')", arg)
+		return input{}, inputErrorf("%q is a directory; give files or file IDs (upload directories with 'openrelik upload')", arg)
 	}
 	return input{kind: inputLocal, path: arg}, nil
 }
@@ -151,7 +161,7 @@ func ResolveInputs(ctx context.Context, client *openrelik.Client, resolve Server
 				var notOnServer *NotOnServerError
 				switch {
 				case err == nil:
-					return nil, 0, fmt.Errorf("%q is both a local file and file %d on the server\nUse ./%s to upload the local file, or %d to use the server file.", arg, id, arg, id)
+					return nil, 0, inputErrorf("%q is both a local file and file %d on the server\nUse ./%s to upload the local file, or %d to use the server file.", arg, id, arg, id)
 				case !errors.As(err, &notOnServer):
 					return nil, 0, fmt.Errorf("%q is a local file, but may also be on the server (use ./%s for the local file): %w", arg, arg, err)
 				}
@@ -181,16 +191,30 @@ func ResolveInputs(ctx context.Context, client *openrelik.Client, resolve Server
 		}
 	}
 
-	// Reuse the files the folder already holds.
-	paths := make([]string, len(toUpload))
-	sizes := make([]int64, len(toUpload))
-	for j, i := range toUpload {
+	// The same local file given twice, perhaps as a.bin and ./a.bin, is
+	// uploaded once.
+	var paths []string
+	var sizes []int64
+	sameAs := map[int]int{} // index into args -> index of its first occurrence
+	firstOf := map[string]int{}
+	for _, i := range toUpload {
+		abs, err := filepath.Abs(args[i])
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to resolve path %s: %w", args[i], err)
+		}
+		if first, ok := firstOf[abs]; ok {
+			sameAs[i] = first
+			continue
+		}
+		firstOf[abs] = i
 		info, err := os.Stat(args[i])
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to stat file %s: %w", args[i], err)
 		}
-		paths[j], sizes[j] = args[i], info.Size()
+		paths, sizes = append(paths, args[i]), append(sizes, info.Size())
 	}
+
+	// Reuse the files the folder already holds.
 	existing, _, err := FindExisting(ctx, client, folder.ID, paths, make([]bool, len(paths)), sizes)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to check folder %d for files already uploaded: %w", folder.ID, err)
@@ -205,6 +229,10 @@ func ResolveInputs(ctx context.Context, client *openrelik.Client, resolve Server
 
 	for _, i := range toUpload {
 		path := args[i]
+		if first, ok := sameAs[i]; ok {
+			fileIDs[i] = fileIDs[first]
+			continue
+		}
 		if id, ok := reused[path]; ok {
 			fileIDs[i] = id
 			continue
@@ -569,13 +597,16 @@ func placeFile(tmpPath, destPath string, overwrite bool) error {
 // VerifyUpload compares localSHA256, the hash of the data sent for an
 // upload, with the hash the server computed for the uploaded file. It
 // returns false without an error if the server has no hash to compare: very
-// large files aren't hashed, and hashing may still be running.
+// large files aren't hashed, and hashing may still be running. It fails if
+// the hash can't be asked for.
 func VerifyUpload(ctx context.Context, client *openrelik.Client, file *openrelik.File, localSHA256 string) (bool, error) {
 	serverSHA256 := file.HashSHA256
 	if serverSHA256 == "" {
-		if info, _, err := client.Files().Info(ctx, file.ID); err == nil {
-			serverSHA256 = info.HashSHA256
+		info, _, err := client.Files().Info(ctx, file.ID)
+		if err != nil {
+			return false, fmt.Errorf("could not get the SHA256 of file %d from the server to verify the upload: %w", file.ID, err)
 		}
+		serverSHA256 = info.HashSHA256
 	}
 	if serverSHA256 == "" {
 		return false, nil

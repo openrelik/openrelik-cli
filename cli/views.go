@@ -520,10 +520,7 @@ func (v *WorkerListView) RenderHuman(w io.Writer) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "COMMAND\tDISPLAY NAME\tDESCRIPTION")
 	for _, wk := range v.Workers {
-		desc := wk.Description
-		if len(desc) > 60 {
-			desc = desc[:57] + "..."
-		}
+		desc := util.Truncate(wk.Description, 60)
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", util.WorkerCommand(wk), wk.DisplayName, desc)
 	}
 	return tw.Flush()
@@ -563,10 +560,7 @@ func (v *TemplateListView) RenderHuman(w io.Writer) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tDISPLAY NAME\tDESCRIPTION")
 	for _, t := range v.Templates {
-		desc := t.Description
-		if len(desc) > 60 {
-			desc = desc[:57] + "..."
-		}
+		desc := util.Truncate(t.Description, 60)
 		fmt.Fprintf(tw, "%d\t%s\t%s\n", t.ID, t.DisplayName, desc)
 	}
 	return tw.Flush()

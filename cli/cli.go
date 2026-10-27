@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
@@ -16,6 +19,7 @@ var (
 	serverURL    string
 	outputFormat string
 	quiet        bool
+	debug        bool
 )
 
 // outputFormats are the values --format accepts.
@@ -52,6 +56,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&serverURL, "server", "", "Server URL to use instead of the active one (overrides OPENRELIK_SERVER_URL)")
 	cmd.PersistentFlags().Var(formatValue{&outputFormat}, "format", "Output format ("+strings.Join(outputFormats, ", ")+")")
 	cmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress all output")
+	cmd.PersistentFlags().BoolVar(&debug, "debug", false, "Show errors from the server as they were received")
 
 	cmd.AddCommand(newAuthCmd())
 	cmd.AddCommand(newUserCmd())
@@ -66,6 +71,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newSkillCmd())
 
 	requireKnownSubcommands(cmd)
+	friendlyErrors(cmd)
 	return cmd
 }
 
@@ -207,9 +213,31 @@ func printTruncationHint(cmd *cobra.Command, shown, total int, noun, advice stri
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
+//
+// Ctrl-C (or SIGTERM) cancels the commands' context, so they can stop
+// cleanly: downloads remove their temporary files, and 'run' says how to
+// follow the workflow that keeps running on the server. A second Ctrl-C ends
+// the CLI at once. An interrupted command exits with 130, as shells do.
 func Execute() {
-	if err := NewRootCmd().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop() // restore the default handling for a second signal
+	}()
+
+	err := NewRootCmd().ExecuteContext(ctx)
+	if err == nil {
+		return
 	}
+	if ctx.Err() != nil {
+		if strings.HasPrefix(err.Error(), "interrupted") {
+			fmt.Fprintln(os.Stderr, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Interrupted: %v\n", err)
+		}
+		os.Exit(130)
+	}
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(1)
 }

@@ -105,7 +105,11 @@ A dry run doesn't contact the server, and uses the cached list of workers.`,
 		// Worker subcommands show their own help from the cache.
 		if cmd == runCmd {
 			// Don't keep the help waiting long for a slow server.
-			ctx, cancel := context.WithTimeout(context.Background(), helpRefreshTimeout)
+			parent := cmd.Context()
+			if parent == nil {
+				parent = context.Background()
+			}
+			ctx, cancel := context.WithTimeout(parent, helpRefreshTimeout)
 			defer cancel()
 			if workers, err := loadWorkers(ctx); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: the list of workers could not be updated, so it may be out of date or empty: %v\n\n", err)
@@ -306,6 +310,10 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			monitor := util.NewWorkflowMonitor(client, workflow, meta.TaskShortNames, meta.TaskUUIDs, meta.UUIDToShort, interactive, showProgress)
 			var lastStatus *openrelik.WorkflowStatus
 			lastStatus, err = monitor.Monitor(cmd.Context())
+			if cmd.Context().Err() != nil {
+				// Interrupted; stopping the CLI doesn't stop the workflow.
+				return fmt.Errorf("interrupted; workflow %d keeps running on the server.\nCheck it with 'openrelik workflow status %d', and download its results with 'openrelik workflow download %d'", workflow.ID, workflow.ID, workflow.ID)
+			}
 			if err != nil && lastStatus == nil {
 				return err
 			}

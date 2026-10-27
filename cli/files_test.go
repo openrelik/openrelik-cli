@@ -195,8 +195,8 @@ func TestFileCatErrors(t *testing.T) {
 		wantStdout   string
 		wantRequests bool
 	}{
-		{name: "not found on second ID", args: []string{"1", "404"}, wantErr: "file 404:", wantStdout: catText, wantRequests: true},
-		{name: "numbered output flushed before error", args: []string{"-n", "1", "404"}, wantErr: "file 404:", wantStdout: "     1\thello\n     2\tworld\n", wantRequests: true},
+		{name: "not found on second ID", args: []string{"1", "404"}, wantErr: "file 404 not found", wantStdout: catText, wantRequests: true},
+		{name: "numbered output flushed before error", args: []string{"-n", "1", "404"}, wantErr: "file 404 not found", wantStdout: "     1\thello\n     2\tworld\n", wantRequests: true},
 		{name: "server error on second ID", args: []string{"1", "500"}, wantErr: "file 500:", wantStdout: catText, wantRequests: true},
 		{name: "name without folder", args: []string{"1", "abc"}, wantErr: `invalid file "abc": give a file ID or a path`},
 		{name: "folder path", args: []string{"Case A/evidence/"}, wantErr: "names a folder"},

@@ -503,8 +503,10 @@ func newSearchFoldersCmd() *cobra.Command {
 		Long: `Search every folder you can access, including subfolders and folders
 shared with you, for names containing TERM (case-insensitive).
 
-Results show each folder's full path, which can be passed to commands
-that take a folder, such as 'folder list'.
+Results show each folder's full path from the root folders, such as
+"/Case A/evidence/". The path can be passed as it is to commands that take
+a folder, such as 'folder list'; the leading and trailing "/" are optional,
+so "Case A/evidence" is the same folder.
 
 Like 'folder list', results are sorted by last update with the most
 recently updated folder last; use --sort name and -r to change the order.

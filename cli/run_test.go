@@ -16,6 +16,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
@@ -554,5 +556,55 @@ func TestRunWorkersLoadedLazily(t *testing.T) {
 	}
 	if _, err := run("run", "bogus", "123"); err == nil || !strings.Contains(err.Error(), `unknown worker "bogus" (see 'openrelik worker list')`) {
 		t.Errorf("expected an unknown-worker error, got %v", err)
+	}
+}
+
+// TestRunInterrupted checks that an interrupted 'run' stops waiting, doesn't
+// download anything, and says how to follow the workflow.
+func TestRunInterrupted(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch path := r.URL.Path; {
+		case strings.HasSuffix(path, "/workflows/") || strings.HasSuffix(path, "/run/"):
+			fmt.Fprint(w, `{"id": 100, "folder": {"id": 1}}`)
+		case strings.HasSuffix(path, "/status/"):
+			cancel() // Ctrl-C while the workflow runs
+			fmt.Fprint(w, `{"status": "RUNNING", "tasks": [{"uuid": "t1", "display_name": "Strings", "status_short": "STARTED"}]}`)
+		case path == "/api/v1/files/123":
+			fmt.Fprint(w, `{"id": 123, "display_name": "input.bin", "folder": {"id": 1}}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	if err := config.SaveWorkersCache(server.URL, []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+	root := NewRootCmd()
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"run", "-o", outDir, "strings", "123"})
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "interrupted; workflow 100 keeps running on the server") || !strings.Contains(err.Error(), "openrelik workflow download 100") {
+			t.Errorf("expected an interrupted error, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run kept waiting after it was interrupted")
+	}
+	if entries, _ := os.ReadDir(outDir); len(entries) > 0 {
+		t.Errorf("expected nothing downloaded, found %d entries", len(entries))
 	}
 }

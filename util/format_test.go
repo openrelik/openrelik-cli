@@ -134,7 +134,11 @@ func TestParseBytes(t *testing.T) {
 		{input: "1.5M", wantErr: true},
 		{input: "-1", wantErr: true},
 		{input: "K", wantErr: true},
-		{input: "10T", wantErr: true},
+		{input: "10T", want: 10 << 40},
+		{input: "1p", want: 1 << 50},
+		{input: "7E", want: 7 << 60},
+		{input: "8E", wantErr: true},
+		{input: "1X", wantErr: true},
 		{input: "", wantErr: true},
 		{input: "9999999999999G", wantErr: true},
 	}

@@ -35,6 +35,25 @@ func removedCmd(use, replacement, note string, aliases ...string) *cobra.Command
 	}
 }
 
+// removedFlag adds a hidden stand-in for a flag of cmd that was replaced.
+// Using it fails with the command to use instead, so old scripts get a clear
+// error rather than "unknown flag". The check runs before cmd's positional
+// args are validated, since the old usage often has too few of them.
+func removedFlag(cmd *cobra.Command, name, replacement string) {
+	cmd.Flags().String(name, "", "")
+	cmd.Flags().MarkHidden(name)
+	validate := cmd.Args
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if c.Flags().Changed(name) {
+			return fmt.Errorf("'%s --%s' was removed. Use instead:\n\n  %s", c.CommandPath(), name, replacement)
+		}
+		if validate == nil {
+			return nil
+		}
+		return validate(c, args)
+	}
+}
+
 // removedFileCmds are the 'file' subcommands replaced by 'folder list' and
 // the top-level 'upload' and 'download'.
 func removedFileCmds() []*cobra.Command {

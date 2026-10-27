@@ -30,6 +30,12 @@ var stdoutIsTerminal = func(w io.Writer) bool {
 	return ok && term.IsTerminal(int(f.Fd()))
 }
 
+// stdinIsTerminal reports whether r is a terminal. Tests override it.
+var stdinIsTerminal = func(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
 func newFileCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "file",
@@ -54,7 +60,11 @@ and timestamps.
 FILE is either a file ID, as shown by 'folder list <FOLDER>', or a path
 of folder names ending in the file name, such as 'Case A/evidence/notes.txt'.
 If more than one file matches a path, the matches are listed so you can
-pick one by ID.`,
+pick one by ID.
+
+Every part of a path is a name, starting at the root folders, so
+'42/notes.txt' looks in a root folder named "42", not in folder 42; use
+the file ID instead.`,
 		Example: `  # Show metadata for file 123
   openrelik file info 123
 
@@ -99,6 +109,9 @@ FILE is either a file ID, as shown by 'folder list <FOLDER>', or a path
 of folder names ending in the file name, such as 'Case A/evidence/notes.txt'.
 Folders in the path are matched as by 'folder list'. If more than one file
 matches a path, the matches are listed so you can pick one by ID.
+Every part of a path is a name, starting at the root folders, so
+'42/notes.txt' looks in a root folder named "42", not in folder 42; use
+the file ID instead.
 
 With --bytes N, only the first N bytes of each file are printed, and the
 download stops once they have been read.

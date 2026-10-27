@@ -194,6 +194,12 @@ func formatFolderPath(names []string) string {
 	return "/" + strings.Join(names, "/") + "/"
 }
 
+// folderNotFoundError is returned by resolveFolderPath when no folder
+// matches the path, as opposed to the server failing to answer.
+type folderNotFoundError string
+
+func (e folderNotFoundError) Error() string { return string(e) }
+
 // resolveFolderPath walks a path like "Case A/evidence/" from the root
 // folders. Every branch whose names match is followed, so a path is only
 // ambiguous if more than one complete path matches.
@@ -214,7 +220,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 	}
 	matches := matchFolderName(roots, segments[0], nil)
 	if len(matches) == 0 {
-		return 0, fmt.Errorf("no root folder named %q", segments[0])
+		return 0, folderNotFoundError(fmt.Sprintf("no root folder named %q", segments[0]))
 	}
 
 	for i, seg := range segments[1:] {
@@ -227,7 +233,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 			next = append(next, matchFolderName(subfolders, seg, m.path)...)
 		}
 		if len(next) == 0 {
-			return 0, fmt.Errorf("no folder named %q in %s", seg, formatFolderPath(segments[:i+1]))
+			return 0, folderNotFoundError(fmt.Sprintf("no folder named %q in %s", seg, formatFolderPath(segments[:i+1])))
 		}
 		matches = next
 	}

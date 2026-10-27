@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -45,8 +46,9 @@ into a root folder named after the current time, e.g.
 Files given directly are skipped if FOLDER already holds a file with the
 same name and SHA256, so an interrupted upload can be run again. If the
 server has no hash for a file with the same name and size (very large
-files aren't hashed, and hashing runs in the background), it counts as
-the same file. Use --force to upload anyway.`,
+files aren't hashed, and hashing runs in the background), you are asked
+whether to upload it; without a terminal to ask on, the upload fails
+instead. Use --force to upload without checking.`,
 		Example: `  # Upload a file to folder 42
   openrelik upload report.pdf 42
 
@@ -109,16 +111,23 @@ the same file. Use --force to upload anyway.`,
 				if err != nil {
 					// The user may have left out the destination, so the
 					// last file was taken as the folder.
-					if _, statErr := os.Stat(dest); statErr == nil {
+					var notFound folderNotFoundError
+					if _, statErr := os.Stat(dest); statErr == nil && errors.As(err, &notFound) {
 						return fmt.Errorf("%w\n\nThe last argument is the folder to upload into, but %q is also a local path. Add the destination folder at the end, or \"/\" to create a new root folder.", err, dest)
 					}
 					return err
 				}
 				if !force {
-					view.Skipped, err = findDuplicates(cmd.Context(), client, view.FolderID, sources, isDir, sizes)
+					var unverified []skippedFile
+					view.Skipped, unverified, err = findDuplicates(cmd.Context(), client, view.FolderID, sources, isDir, sizes)
 					if err != nil {
 						return err
 					}
+					declined, err := askUnverified(cmd, unverified)
+					if err != nil {
+						return err
+					}
+					view.Skipped = append(view.Skipped, declined...)
 				}
 			} else {
 				single = len(sources) == 1 && isDir[0]
@@ -177,6 +186,7 @@ the same file. Use --force to upload anyway.`,
 	cmd.Flags().BoolVar(&force, "force", false, "Upload files even if FOLDER already holds the same file")
 	cmd.Flags().IntVarP(&maxDepth, "depth", "d", 3, "Maximum subfolder depth to upload")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 4*1024*1024, "Chunk size in bytes")
+	removedFlag(cmd, "folder", "openrelik upload <PATH>... <FOLDER>")
 	return cmd
 }
 
@@ -209,51 +219,91 @@ type skippedFile struct {
 
 // findDuplicates returns the files among sources that folderID already
 // holds. Only files with the same name and size are compared, so other
-// files cost nothing beyond one listing of the folder. A match needs the
-// same SHA256, unless the server has no hash for the file: hashing is
-// skipped for very large files and runs in the background, and re-uploading
-// a large image by accident is the case worth guarding against.
-func findDuplicates(ctx context.Context, client *openrelik.Client, folderID int, sources []string, isDir []bool, sizes []int64) ([]skippedFile, error) {
+// files cost nothing beyond one listing of the folder. Files with the same
+// SHA256 are returned as duplicates. Files the server has no hash for are
+// returned as unverified instead: hashing is skipped for very large files
+// and runs in the background, so the same name and size is all there is to
+// go on, and memory images of the same machine often share both.
+func findDuplicates(ctx context.Context, client *openrelik.Client, folderID int, sources []string, isDir []bool, sizes []int64) (duplicates, unverified []skippedFile, err error) {
 	if !slices.Contains(isDir, false) {
-		return nil, nil // only directories, which go into new subfolders
+		return nil, nil, nil // only directories, which go into new subfolders
 	}
 	existing, _, err := client.Folders().ListFiles(ctx, folderID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	var skipped []skippedFile
 	for i, p := range sources {
 		if isDir[i] {
 			continue
 		}
 		var localHash string
+		var unhashed *skippedFile
 		for _, f := range existing {
 			if f.DisplayName != filepath.Base(p) || f.Filesize != sizes[i] {
 				continue
 			}
 			info, _, err := client.Files().Info(ctx, f.ID)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			reason := "same name and SHA256"
 			if info.HashSHA256 == "" {
-				reason = "same name and size; the server has no hash to compare"
-			} else {
-				if localHash == "" {
-					if localHash, err = fileSHA256(p); err != nil {
-						return nil, err
-					}
+				if unhashed == nil {
+					unhashed = &skippedFile{Path: p, FileID: f.ID, FolderID: folderID,
+						Reason: "same name and size; the server has no hash to compare"}
 				}
-				if !strings.EqualFold(localHash, info.HashSHA256) {
-					continue
+				continue
+			}
+			if localHash == "" {
+				if localHash, err = fileSHA256(p); err != nil {
+					return nil, nil, err
 				}
 			}
-			skipped = append(skipped, skippedFile{Path: p, FileID: f.ID, FolderID: folderID, Reason: reason})
-			break
+			if strings.EqualFold(localHash, info.HashSHA256) {
+				duplicates = append(duplicates, skippedFile{Path: p, FileID: f.ID, FolderID: folderID, Reason: "same name and SHA256"})
+				unhashed = nil
+				break
+			}
+		}
+		if unhashed != nil {
+			unverified = append(unverified, *unhashed)
 		}
 	}
-	return skipped, nil
+	return duplicates, unverified, nil
+}
+
+// askUnverified asks whether to upload each file that may already be in
+// the destination folder, and returns the ones to skip. Without a terminal
+// to ask on, it fails instead, so a script never skips a file silently.
+func askUnverified(cmd *cobra.Command, unverified []skippedFile) ([]skippedFile, error) {
+	if len(unverified) == 0 {
+		return nil, nil
+	}
+	describe := func(s skippedFile) string {
+		return fmt.Sprintf("%q may already be in folder %d as file %d: it has the same name and size, but the server has no hash to compare.",
+			filepath.Base(s.Path), s.FolderID, s.FileID)
+	}
+
+	if !stdinIsTerminal(cmd.InOrStdin()) {
+		var b strings.Builder
+		for _, s := range unverified {
+			b.WriteString(describe(s) + "\n")
+		}
+		b.WriteString("\nUse --force to upload anyway, or leave these files out.")
+		return nil, errors.New(b.String())
+	}
+
+	var skip []skippedFile
+	for _, s := range unverified {
+		upload, err := util.Confirm(cmd.ErrOrStderr(), cmd.InOrStdin(), describe(s)+" Upload anyway?")
+		if err != nil {
+			return nil, err
+		}
+		if !upload {
+			skip = append(skip, s)
+		}
+	}
+	return skip, nil
 }
 
 // fileSHA256 returns the hex SHA256 of the file at path.
@@ -342,6 +392,10 @@ of folder names ending in the file name, such as 'Case A/evidence/notes.txt'.
 If more than one file matches a path, the matches are listed so you can
 pick one by ID.
 
+Every part of a path is a name, starting at the root folders, so
+'42/notes.txt' looks in a root folder named "42", not in folder 42; use
+the file ID instead.
+
 DESTINATION may be a file path or an existing directory; if a directory is
 given, the original filename is used inside it.
 If DESTINATION is omitted, the file is saved to the current directory using
@@ -361,7 +415,15 @@ followed. If the name can't be used, give DESTINATION as a file path.`,
 
   # Download into a directory (uses original filename)
   openrelik download 123 ./output/`,
-		Args: util.UseArgsWithQuoteHint(),
+		Args: func(cmd *cobra.Command, args []string) error {
+			// FILE is the argument most likely to hold spaces, so don't
+			// suggest quoting only DESTINATION as UseArgsWithQuoteHint would.
+			err := util.UseArgs()(cmd, args)
+			if err != nil && len(args) > 2 {
+				return fmt.Errorf("%w, got %d\nQuote FILE and DESTINATION if they contain spaces.", err, len(args))
+			}
+			return err
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := newClient()
 			if err != nil {
@@ -370,6 +432,11 @@ followed. If the name can't be used, give DESTINATION as a file path.`,
 
 			fileID, err := resolveFile(cmd.Context(), client, args[0])
 			if err != nil {
+				// An unquoted path such as Case A/notes.txt splits into
+				// FILE "Case" and DESTINATION "A/notes.txt".
+				if len(args) > 1 && !strings.Contains(args[0], "/") && !folderIDPattern.MatchString(args[0]) {
+					return fmt.Errorf("%w\nQuote FILE if it contains spaces: %q", err, strings.Join(args, " "))
+				}
 				return err
 			}
 
@@ -453,6 +520,7 @@ followed. If the name can't be used, give DESTINATION as a file path.`,
 		},
 	}
 
+	removedFlag(cmd, "file", "openrelik download <FILE> [DESTINATION]")
 	return cmd
 }
 

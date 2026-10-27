@@ -353,17 +353,19 @@ func FormatBytes(b int64) string {
 }
 
 // ParseBytes parses a byte count such as "512", "4K", "10MB" or "1g". As
-// with 'head -c' and FormatBytes, the K, M and G suffixes are powers of 1024.
+// with 'head -c' and FormatBytes, the K, M, G, T, P and E suffixes are
+// powers of 1024.
 func ParseBytes(s string) (int64, error) {
+	const units = "KMGTPE" // as in FormatBytes
 	num := strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(s)), "B")
 	mult := int64(1)
-	if i := strings.IndexAny(num, "KMG"); i >= 0 && i == len(num)-1 {
-		mult = int64(1) << (10 * (1 + strings.IndexByte("KMG", num[i])))
+	if i := strings.IndexAny(num, units); i >= 0 && i == len(num)-1 {
+		mult = int64(1) << (10 * (1 + strings.IndexByte(units, num[i])))
 		num = num[:i]
 	}
 	n, err := strconv.ParseInt(num, 10, 64)
 	if err != nil || n < 0 || n > math.MaxInt64/mult {
-		return 0, fmt.Errorf("invalid byte count %q (use a number such as 512, 4K, 10M or 1G)", s)
+		return 0, fmt.Errorf("invalid byte count %q (use a number such as 512, 4K, 10M, 1G or 2T)", s)
 	}
 	return n * mult, nil
 }

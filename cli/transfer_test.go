@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -128,6 +129,13 @@ func writeTree(t *testing.T, dirName string, files ...string) string {
 
 func runUpload(t *testing.T, server *uploadServer, args ...string) (string, error) {
 	t.Helper()
+	return runUploadWithInput(t, server, "", args...)
+}
+
+// runUploadWithInput runs 'upload' with input on stdin, for answering
+// prompts.
+func runUploadWithInput(t *testing.T, server *uploadServer, input string, args ...string) (string, error) {
+	t.Helper()
 	t.Setenv("OPENRELIK_API_KEY", "test-key")
 	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
 
@@ -135,6 +143,7 @@ func runUpload(t *testing.T, server *uploadServer, args ...string) (string, erro
 	stdout := new(bytes.Buffer)
 	root.SetOut(stdout)
 	root.SetErr(new(bytes.Buffer))
+	root.SetIn(strings.NewReader(input))
 	root.SetArgs(append([]string{"upload"}, args...))
 	err := root.Execute()
 	return stdout.String(), err
@@ -286,7 +295,8 @@ func TestUploadErrors(t *testing.T) {
 		{name: "unknown folder path", args: []string{a, "Case A/nope/"}, wantErr: `no folder named "nope" in /Case A/`},
 		{name: "forgotten destination", args: []string{a, b}, wantErr: "is also a local path. Add the destination folder at the end"},
 		{name: "filesystem root", args: []string{"/"}, wantErr: `refusing to upload the filesystem root "/"`},
-		{name: "old --folder flag is gone", args: []string{a, "--folder", "42"}, wantErr: "unknown flag: --folder"},
+		{name: "old --folder flag points to FOLDER", args: []string{a, "--folder", "42"}, wantErr: "'openrelik upload --folder' was removed. Use instead:\n\n  openrelik upload <PATH>... <FOLDER>"},
+		{name: "old --folder= flag points to FOLDER", args: []string{a, "--folder=Case A/"}, wantErr: "'openrelik upload --folder' was removed"},
 		{name: "no paths", args: []string{}, wantErr: "PATH"},
 		{name: "negative depth", args: []string{a, "--depth", "-1"}, wantErr: "invalid depth: -1"},
 		{name: "zero chunk size", args: []string{a, "--chunk-size", "0"}, wantErr: "invalid chunk size: 0"},
@@ -345,14 +355,6 @@ func TestUploadSkipsDuplicates(t *testing.T) {
 			wantSkipped: true,
 		},
 		{
-			name:        "no server hash counts as the same file",
-			args:        []string{a, "42"},
-			files:       existing("a.txt", len(content)),
-			wantUploads: map[string]string{},
-			wantOutput:  []string{"(same name and size; the server has no hash to compare)"},
-			wantSkipped: true,
-		},
-		{
 			name:        "different content is uploaded",
 			args:        []string{a, "42"},
 			files:       existing("a.txt", len(content)),
@@ -405,6 +407,125 @@ func TestUploadSkipsDuplicates(t *testing.T) {
 	}
 }
 
+func TestUploadUnverifiedDuplicates(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt", "b.txt")
+	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
+
+	tests := []struct {
+		name        string
+		terminal    bool
+		input       string
+		wantErr     string
+		wantUploads map[string]string
+		wantOutput  string
+	}{
+		{
+			name:        "fails without a terminal",
+			wantErr:     "\"a.txt\" may already be in folder 42 as file 77: it has the same name and size, but the server has no hash to compare.\n\nUse --force",
+			wantUploads: map[string]string{},
+		},
+		{
+			name:        "uploads when confirmed",
+			terminal:    true,
+			input:       "y\n",
+			wantUploads: map[string]string{"a.txt": "42", "b.txt": "42"},
+		},
+		{
+			name:        "skips when declined",
+			terminal:    true,
+			input:       "n\n",
+			wantUploads: map[string]string{"b.txt": "42"},
+			wantOutput:  `Skipped "a.txt": already in folder 42 as file 77 (same name and size; the server has no hash to compare)`,
+		},
+		{
+			name:        "skips at end of input",
+			terminal:    true,
+			wantUploads: map[string]string{"b.txt": "42"},
+			wantOutput:  `Skipped "a.txt"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := stdinIsTerminal
+			stdinIsTerminal = func(io.Reader) bool { return tt.terminal }
+			t.Cleanup(func() { stdinIsTerminal = orig })
+
+			server := newUploadServer(t)
+			defer server.Close()
+			server.files["42"] = fmt.Sprintf(`[{"id": 77, "display_name": "a.txt", "filesize": %d}]`, len("content of a.txt"))
+			server.info["77"] = `{"id": 77, "display_name": "a.txt"}`
+
+			out, err := runUploadWithInput(t, server, tt.input, a, b, "42")
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if fmt.Sprint(server.uploads) != fmt.Sprint(tt.wantUploads) {
+				t.Errorf("uploaded %v, want %v", server.uploads, tt.wantUploads)
+			}
+			if !strings.Contains(out, tt.wantOutput) {
+				t.Errorf("expected output to contain %q\n%s", tt.wantOutput, out)
+			}
+		})
+	}
+}
+
+func TestUploadPrefersHashMatchOverUnhashed(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt")
+	content := "content of a.txt"
+	sum := sha256.Sum256([]byte(content))
+
+	server := newUploadServer(t)
+	defer server.Close()
+	server.files["42"] = fmt.Sprintf(`[{"id": 76, "display_name": "a.txt", "filesize": %d}, {"id": 77, "display_name": "a.txt", "filesize": %d}]`,
+		len(content), len(content))
+	server.info["76"] = `{"id": 76, "display_name": "a.txt"}`
+	server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
+
+	// No terminal, so asking about file 76 would fail.
+	out, err := runUpload(t, server, filepath.Join(loose, "a.txt"), "42")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if want := `Skipped "a.txt": already in folder 42 as file 77 (same name and SHA256)`; !strings.Contains(out, want) {
+		t.Errorf("expected output to contain %q\n%s", want, out)
+	}
+}
+
+func TestUploadForgottenDestinationHint(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "Dup", "missing"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(dir)
+
+	for _, tt := range []struct {
+		name     string
+		dest     string
+		wantHint bool
+	}{
+		{name: "no such folder", dest: "missing", wantHint: true},
+		{name: "ambiguous folder", dest: "Dup"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			_, err := runUpload(t, server, "a.txt", tt.dest)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := strings.Contains(err.Error(), "is also a local path"); got != tt.wantHint {
+				t.Errorf("hint = %v, want %v: %v", got, tt.wantHint, err)
+			}
+		})
+	}
+}
+
 func TestUploadDuplicateCheckScope(t *testing.T) {
 	evidence := writeTree(t, "evidence", "disk.E01")
 	loose := writeTree(t, "loose", "a.txt")
@@ -437,8 +558,9 @@ func TestUploadJSONIncludesSkipped(t *testing.T) {
 	loose := writeTree(t, "loose", "a.txt")
 	server := newUploadServer(t)
 	defer server.Close()
+	sum := sha256.Sum256([]byte("content of a.txt"))
 	server.files["42"] = `[{"id": 77, "display_name": "a.txt", "filesize": 16}]`
-	server.info["77"] = `{"id": 77, "display_name": "a.txt"}`
+	server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
 
 	out, err := runUpload(t, server, filepath.Join(loose, "a.txt"), "42", "--format", "json")
 	if err != nil {
@@ -719,8 +841,9 @@ func TestDownloadArgErrors(t *testing.T) {
 		{name: "missing file", args: []string{"download"}, wantErr: "missing required argument: FILE"},
 		{name: "zero file ID", args: []string{"download", "0"}, wantErr: "invalid file ID: 0"},
 		{name: "name without folder", args: []string{"download", "abc"}, wantErr: `invalid file "abc"`},
-		{name: "two destinations", args: []string{"download", "1", "a", "b"}, wantErr: "too many arguments"},
-		{name: "old --file flag is gone", args: []string{"download", "--file", "1"}, wantErr: "unknown flag: --file"},
+		{name: "two destinations", args: []string{"download", "1", "a", "b"}, wantErr: "too many arguments: expected at most 2, got 3\nQuote FILE and DESTINATION if they contain spaces."},
+		{name: "unquoted path", args: []string{"download", "Case", "A/notes.txt"}, wantErr: `Quote FILE if it contains spaces: "Case A/notes.txt"`},
+		{name: "old --file flag points to FILE", args: []string{"download", "--file", "1"}, wantErr: "'openrelik download --file' was removed. Use instead:\n\n  openrelik download <FILE> [DESTINATION]"},
 		{name: "old file download points to download", args: []string{"file", "download", "1"}, wantErr: "openrelik download <FILE> [DESTINATION]"},
 		{name: "old folder upload is gone", args: []string{"folder", "upload", "x"}, wantErr: `unknown command "upload" for "openrelik folder"`},
 	}

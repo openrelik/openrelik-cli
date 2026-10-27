@@ -27,7 +27,7 @@ List existing folders or upload a local directory to the server:
 
 ```bash
 openrelik folder list
-openrelik folder upload /path/to/local/evidence
+openrelik upload /path/to/local/evidence
 ```
 
 ### Worker Execution
@@ -119,8 +119,8 @@ openrelik user me --format json
 Organize files in hierarchical directories.
 
 *   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"`; an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
+*   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list` and the `--folder`/`--parent` flags. Shows the 30 most recently updated matches by default; use `--limit N` to show more or `--limit 0` for all. `--sort` and `-r` work as in `folder list`.
 *   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder.
-*   `folder upload <PATH> [PATH...]`: Upload files and directories. Directories are uploaded recursively (up to `--depth` levels, default 3) and recreated as folders. Use `--folder <FOLDER>` (an ID or path) to upload into an existing folder; otherwise a new root folder is created, named after the directory when uploading a single directory, or after the current time (e.g. `Upload 2026-10-27 14:05`). Use `--name` to choose the new folder's name.
 
 #### Examples
 
@@ -140,29 +140,39 @@ openrelik folder list 12
 # List a folder by its path from the root folders
 openrelik folder list "Case A/evidence/"
 
-# Upload a disk image to folder 42
-openrelik folder upload /path/to/image.dd --folder 42
-
-# Upload a directory into a new root folder named "evidence"
-openrelik folder upload /path/to/evidence
-
-# Upload several files into a new root folder with a chosen name
-openrelik folder upload disk.E01 memory.raw --name "Case 2026-001"
+# Find folders with "plaso" in their name
+openrelik folder search plaso
 ```
 
-### File Management (`file`)
+### Uploading and Downloading (`upload`, `download`)
 
-Download and inspect forensic files. To upload files, use `folder upload`.
+Move files between your machine and OpenRelik.
 
-*   `file info <FILE_ID>`: Return file metadata including size, hashes, and MIME type.
-*   `file download <FILE_ID>`: Download a file. Use `--output-dir` to choose the destination.
+*   `upload <PATH> [PATH...]`: Upload files and directories. Directories are uploaded recursively (up to `--depth` levels, default 3) and recreated as folders. Use `--folder <FOLDER>` (an ID or path) to upload into an existing folder; otherwise a new root folder is created, named after the directory when uploading a single directory, or after the current time (e.g. `Upload 2026-10-27 14:05`). Use `--name` to choose the new folder's name.
+*   `download --file <FILE_ID> [DESTINATION]`: Download a file. `DESTINATION` may be a file path or an existing directory; by default the file is saved in the current directory under its original name.
 
 #### Examples
 
 ```bash
-# Download file 105 to a custom directory
-openrelik file download 105 --output-dir /tmp/downloads
+# Upload a disk image to folder 42, or to a folder by its path
+openrelik upload /path/to/image.dd --folder 42
+openrelik upload /path/to/image.dd --folder "Case A/evidence/"
+
+# Upload a directory into a new root folder named "evidence"
+openrelik upload /path/to/evidence
+
+# Upload several files into a new root folder with a chosen name
+openrelik upload disk.E01 memory.raw --name "Case 2026-001"
+
+# Download file 105 into a directory
+openrelik download --file 105 /tmp/downloads/
 ```
+
+### File Management (`file`)
+
+Inspect forensic files.
+
+*   `file info <FILE_ID>`: Return file metadata including size, hashes, and MIME type.
 
 ### Worker Management (`worker`)
 

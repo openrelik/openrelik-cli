@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -581,289 +580,6 @@ func TestFolderListFilesError(t *testing.T) {
 	}
 }
 
-// uploadServer is a mock API that records the folders created and the files
-// uploaded by 'folder upload'.
-type uploadServer struct {
-	*httptest.Server
-	mu         sync.Mutex
-	nextID     int
-	roots      []string          // names of created root folders
-	subfolders []string          // "parentID/name" of created subfolders
-	uploads    map[string]string // filename -> folder_id
-}
-
-func newUploadServer(t *testing.T) *uploadServer {
-	t.Helper()
-	s := &uploadServer{nextID: 500, uploads: map[string]string{}}
-	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet {
-			// A small tree for resolving --folder and --parent paths:
-			// /Case A/ (42) containing /evidence/ (43).
-			switch r.URL.Path {
-			case "/api/v1/folders/all/":
-				fmt.Fprint(w, `{"folders": [{"id": 42, "display_name": "Case A"}], "page": 1, "page_size": 100, "total_count": 1}`)
-			case "/api/v1/folders/42/folders/":
-				fmt.Fprint(w, `[{"id": 43, "display_name": "evidence"}]`)
-			case "/api/v1/folders/43/folders/":
-				fmt.Fprint(w, `[]`)
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-			return
-		}
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		switch {
-		case r.URL.Path == "/api/v1/files/upload":
-			name := r.URL.Query().Get("resumableFilename")
-			s.uploads[name] = r.URL.Query().Get("folder_id")
-			fmt.Fprintf(w, `{"id": 900, "display_name": %q}`, name)
-		case r.URL.Path == "/api/v1/folders/" || strings.HasSuffix(r.URL.Path, "/folders/"):
-			var body struct {
-				DisplayName string `json:"display_name"`
-			}
-			json.NewDecoder(r.Body).Decode(&body)
-			s.nextID++
-			if r.URL.Path == "/api/v1/folders/" {
-				s.roots = append(s.roots, body.DisplayName)
-			} else {
-				parent := strings.Split(r.URL.Path, "/")[4]
-				s.subfolders = append(s.subfolders, parent+"/"+body.DisplayName)
-			}
-			fmt.Fprintf(w, `{"id": %d, "display_name": %q}`, s.nextID, body.DisplayName)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	return s
-}
-
-// writeTree creates files (relative paths) with some content under a new
-// temp dir named dirName and returns the dir's path.
-func writeTree(t *testing.T, dirName string, files ...string) string {
-	t.Helper()
-	dir := filepath.Join(t.TempDir(), dirName)
-	for _, f := range files {
-		p := filepath.Join(dir, f)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte("content of "+f), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return dir
-}
-
-func runUpload(t *testing.T, server *uploadServer, args ...string) (string, error) {
-	t.Helper()
-	t.Setenv("OPENRELIK_API_KEY", "test-key")
-	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
-
-	root := NewRootCmd()
-	stdout := new(bytes.Buffer)
-	root.SetOut(stdout)
-	root.SetErr(new(bytes.Buffer))
-	root.SetArgs(append([]string{"folder", "upload"}, args...))
-	err := root.Execute()
-	return stdout.String(), err
-}
-
-func TestFolderUpload(t *testing.T) {
-	evidence := writeTree(t, "evidence", "disk.E01", "logs/syslog", "logs/deep/auth.log")
-	loose := writeTree(t, "loose", "a.txt", "b.txt")
-	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
-
-	tests := []struct {
-		name           string
-		args           []string
-		wantRoots      []string // exact names; "Upload *" matches the timestamp name
-		wantSubfolders []string
-		wantUploads    map[string]string
-		wantOutput     []string
-	}{
-		{
-			name:        "file into existing folder",
-			args:        []string{a, "--folder", "42"},
-			wantUploads: map[string]string{"a.txt": "42"},
-			wantOutput:  []string{`File "a.txt" uploaded to folder 42 (ID 900)`},
-		},
-		{
-			name:        "files into new timestamped root folder",
-			args:        []string{a, b},
-			wantRoots:   []string{"Upload *"},
-			wantUploads: map[string]string{"a.txt": "501", "b.txt": "501"},
-			wantOutput:  []string{`(ID 501)`, `File "b.txt" uploaded to folder 501`},
-		},
-		{
-			name:        "files into new named root folder",
-			args:        []string{a, "--name", "Case 7"},
-			wantRoots:   []string{"Case 7"},
-			wantUploads: map[string]string{"a.txt": "501"},
-			wantOutput:  []string{`Folder "Case 7" created (ID 501)`},
-		},
-		{
-			name:           "single directory becomes the root folder",
-			args:           []string{evidence},
-			wantRoots:      []string{"evidence"},
-			wantSubfolders: []string{"501/logs", "502/deep"},
-			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502", "auth.log": "503"},
-		},
-		{
-			name:        "file into folder given by path",
-			args:        []string{a, "--folder", "Case A/evidence/"},
-			wantUploads: map[string]string{"a.txt": "43"},
-			wantOutput:  []string{`File "a.txt" uploaded to folder 43`},
-		},
-		{
-			name:           "directory into existing folder is created inside it",
-			args:           []string{evidence, "--folder", "42"},
-			wantSubfolders: []string{"42/evidence", "501/logs", "502/deep"},
-			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502", "auth.log": "503"},
-		},
-		{
-			name:           "depth limits recursion",
-			args:           []string{evidence, "--depth", "1"},
-			wantRoots:      []string{"evidence"},
-			wantSubfolders: []string{"501/logs"},
-			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502"},
-		},
-		{
-			name:           "mixed files and directories into new root folder",
-			args:           []string{a, evidence},
-			wantRoots:      []string{"Upload *"},
-			wantSubfolders: []string{"501/evidence", "502/logs", "503/deep"},
-			wantUploads:    map[string]string{"a.txt": "501", "disk.E01": "502", "syslog": "503", "auth.log": "504"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := newUploadServer(t)
-			defer server.Close()
-
-			out, err := runUpload(t, server, tt.args...)
-			if err != nil {
-				t.Fatalf("Execute() failed: %v", err)
-			}
-
-			if len(server.roots) != len(tt.wantRoots) {
-				t.Fatalf("created root folders %q, want %q", server.roots, tt.wantRoots)
-			}
-			for i, want := range tt.wantRoots {
-				got := server.roots[i]
-				if want == "Upload *" {
-					if _, err := time.Parse("Upload 2006-01-02 15:04", got); err != nil {
-						t.Errorf("root folder %q is not a timestamp name: %v", got, err)
-					}
-				} else if got != want {
-					t.Errorf("created root folder %q, want %q", got, want)
-				}
-			}
-			if strings.Join(server.subfolders, ",") != strings.Join(tt.wantSubfolders, ",") {
-				t.Errorf("created subfolders %q, want %q", server.subfolders, tt.wantSubfolders)
-			}
-			if len(server.uploads) != len(tt.wantUploads) {
-				t.Errorf("uploaded %v, want %v", server.uploads, tt.wantUploads)
-			}
-			for file, folder := range tt.wantUploads {
-				if got := server.uploads[file]; got != folder {
-					t.Errorf("%s uploaded to folder %q, want %q", file, got, folder)
-				}
-			}
-			for _, want := range tt.wantOutput {
-				if !strings.Contains(out, want) {
-					t.Errorf("expected output to contain %q\n%s", want, out)
-				}
-			}
-		})
-	}
-}
-
-func TestFolderUploadErrors(t *testing.T) {
-	loose := writeTree(t, "loose", "a.txt")
-	a := filepath.Join(loose, "a.txt")
-
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
-	}{
-		{name: "missing path creates nothing", args: []string{a, filepath.Join(loose, "missing")}, wantErr: "no such file"},
-		{name: "folder and name conflict", args: []string{a, "--folder", "42", "--name", "x"}, wantErr: "none of the others can be"},
-		{name: "invalid folder ID", args: []string{a, "--folder", "0"}, wantErr: "invalid folder ID"},
-		{name: "unknown folder path", args: []string{a, "--folder", "Case A/nope/"}, wantErr: `no folder named "nope" in /Case A/`},
-		{name: "no paths", args: []string{}, wantErr: "PATH"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := newUploadServer(t)
-			defer server.Close()
-
-			_, err := runUpload(t, server, tt.args...)
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
-			}
-			if len(server.roots)+len(server.subfolders)+len(server.uploads) > 0 {
-				t.Errorf("nothing should be created on error: roots %q, subfolders %q, uploads %v",
-					server.roots, server.subfolders, server.uploads)
-			}
-		})
-	}
-}
-
-func TestFolderUploadJSON(t *testing.T) {
-	loose := writeTree(t, "loose", "a.txt")
-	server := newUploadServer(t)
-	defer server.Close()
-
-	out, err := runUpload(t, server, filepath.Join(loose, "a.txt"), "--name", "Case", "--format", "json")
-	if err != nil {
-		t.Fatalf("Execute() failed: %v", err)
-	}
-	var got struct {
-		FolderID int `json:"folder_id"`
-		Created  struct {
-			ID          int    `json:"id"`
-			DisplayName string `json:"display_name"`
-		} `json:"created_folder"`
-		Uploads []struct {
-			File     struct{ ID int } `json:"file"`
-			FolderID int              `json:"folder_id"`
-		} `json:"uploads"`
-	}
-	if err := json.Unmarshal([]byte(out), &got); err != nil {
-		t.Fatalf("invalid JSON: %v\n%s", err, out)
-	}
-	if got.FolderID != 501 || got.Created.DisplayName != "Case" || len(got.Uploads) != 1 ||
-		got.Uploads[0].File.ID != 900 || got.Uploads[0].FolderID != 501 {
-		t.Errorf("unexpected JSON: %s", out)
-	}
-}
-
-func TestDefaultUploadFolderName(t *testing.T) {
-	now := time.Date(2026, 10, 27, 14, 5, 0, 0, time.UTC)
-	tests := []struct {
-		paths []string
-		isDir []bool
-		want  string
-	}{
-		{[]string{"./evidence/"}, []bool{true}, "evidence"},
-		{[]string{"/cases/disk.E01"}, []bool{false}, "Upload 2026-10-27 14:05"},
-		{[]string{"a", "b"}, []bool{true, true}, "Upload 2026-10-27 14:05"},
-	}
-	for _, tt := range tests {
-		if got := defaultUploadFolderName(tt.paths, tt.isDir, now); got != tt.want {
-			t.Errorf("defaultUploadFolderName(%q) = %q, want %q", tt.paths, got, tt.want)
-		}
-	}
-}
-
 // newFolderTreeServer serves a fixed folder tree for path resolution tests:
 //
 //	/Case A/ (1)        /evidence/ (11)
@@ -1026,5 +742,204 @@ func TestFolderListEmptyPrintsNothing(t *testing.T) {
   "files": []
 }` {
 		t.Errorf("unexpected JSON for an empty folder: %q", stdout)
+	}
+}
+
+// searchServer serves count folders matching any search term. Folder i is
+// named "match i", lives at /case/sub i/match i/, and was updated i hours
+// after a base time. Folder lookups are counted in gets.
+type searchServer struct {
+	*httptest.Server
+	mu      sync.Mutex
+	gets    int
+	queries []string
+}
+
+func newSearchServer(t *testing.T, count int, failGet bool) *searchServer {
+	t.Helper()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := &searchServer{}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/folders/all/" {
+			s.mu.Lock()
+			s.queries = append(s.queries, r.URL.Query().Get("q"))
+			s.mu.Unlock()
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+			var items []string
+			for id := (page-1)*pageSize + 1; id <= min(page*pageSize, count); id++ {
+				items = append(items, fmt.Sprintf(`{"id": %d, "display_name": "match %d", "updated_at": %q}`,
+					id, id, base.Add(time.Duration(id)*time.Hour).Format(time.RFC3339)))
+			}
+			fmt.Fprintf(w, `{"folders": [%s], "page": %d, "page_size": %d, "total_count": %d}`,
+				strings.Join(items, ","), page, pageSize, count)
+			return
+		}
+		if id, ok := strings.CutPrefix(r.URL.Path, "/api/v1/folders/"); ok && !strings.Contains(id, "/") {
+			s.mu.Lock()
+			s.gets++
+			s.mu.Unlock()
+			if failGet {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, `{"id": %s, "display_name": "match %s", "parent": {"id": 0, "display_name": "sub %s", "parent": {"display_name": "case"}}}`, id, id, id)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	return s
+}
+
+func runSearch(t *testing.T, server *searchServer, args ...string) (string, string, error) {
+	t.Helper()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+	root := NewRootCmd()
+	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs(append([]string{"folder", "search"}, args...))
+	err := root.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
+func TestFolderSearch(t *testing.T) {
+	tests := []struct {
+		name      string
+		count     int
+		args      []string
+		wantRows  []string // IDs in display order
+		wantGets  int
+		wantHint  string
+		wantQuery string
+	}{
+		{name: "few results", count: 3, args: []string{"match"}, wantRows: []string{"1", "2", "3"}, wantGets: 3, wantQuery: "match"},
+		{
+			name:     "default limit keeps 30 most recent",
+			count:    40,
+			args:     []string{"match"},
+			wantRows: []string{"11", "12"}, // first rows; 30 shown in total
+			wantGets: 30,
+			wantHint: "Showing 30 of 40 folders. Use --limit N to see more, or --limit 0 for all.",
+		},
+		{name: "limit 0 shows all across pages", count: 150, args: []string{"match", "--limit", "0"}, wantGets: 150},
+		{name: "reverse", count: 3, args: []string{"match", "-r"}, wantRows: []string{"3", "2", "1"}, wantGets: 3},
+		{name: "term is trimmed", count: 1, args: []string{"  untitled workflow "}, wantRows: []string{"1"}, wantGets: 1, wantQuery: "untitled workflow"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newSearchServer(t, tt.count, false)
+			defer server.Close()
+
+			stdout, stderr, err := runSearch(t, server, tt.args...)
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+
+			lines := strings.Split(strings.TrimSpace(stdout), "\n")
+			if strings.Join(strings.Fields(lines[0]), " ") != "ID PATH UPDATED" {
+				t.Fatalf("unexpected header:\n%s", stdout)
+			}
+			for i, id := range tt.wantRows {
+				if fields := strings.Fields(lines[i+1]); fields[0] != id {
+					t.Errorf("row %d has ID %s, want %s\n%s", i, fields[0], id, stdout)
+				}
+			}
+			if !strings.Contains(stdout, "/case/sub 1") && tt.count < 30 {
+				t.Errorf("expected full paths in output:\n%s", stdout)
+			}
+			if server.gets != tt.wantGets {
+				t.Errorf("got %d folder lookups, want %d", server.gets, tt.wantGets)
+			}
+			if tt.wantHint != "" && !strings.Contains(stderr, tt.wantHint) {
+				t.Errorf("expected stderr to contain %q, got %q", tt.wantHint, stderr)
+			}
+			if tt.wantHint == "" && stderr != "" {
+				t.Errorf("expected no stderr, got %q", stderr)
+			}
+			if tt.wantQuery != "" && server.queries[0] != tt.wantQuery {
+				t.Errorf("searched for %q, want %q", server.queries[0], tt.wantQuery)
+			}
+		})
+	}
+}
+
+func TestFolderSearchJSON(t *testing.T) {
+	server := newSearchServer(t, 2, false)
+	defer server.Close()
+
+	stdout, stderr, err := runSearch(t, server, "match", "--format", "json")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	var got []struct {
+		ID          int    `json:"id"`
+		DisplayName string `json:"display_name"`
+		Path        string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("output is not a JSON array: %v\n%s", err, stdout)
+	}
+	if len(got) != 2 || got[0].Path != "/case/sub 1/match 1/" || got[0].DisplayName != "match 1" {
+		t.Errorf("unexpected folders: %+v", got)
+	}
+	if stderr != "" {
+		t.Errorf("expected no stderr with JSON output, got %q", stderr)
+	}
+}
+
+func TestFolderSearchNoMatches(t *testing.T) {
+	server := newSearchServer(t, 0, false)
+	defer server.Close()
+
+	stdout, stderr, err := runSearch(t, server, "nothing")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if stdout != "" {
+		t.Errorf("expected no stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, `No folders match "nothing".`) {
+		t.Errorf("expected a no-match message on stderr, got %q", stderr)
+	}
+
+	stdout, _, err = runSearch(t, server, "nothing", "--format", "json")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if strings.TrimSpace(stdout) != "[]" {
+		t.Errorf("unexpected JSON for no matches: %q", stdout)
+	}
+}
+
+func TestFolderSearchErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		failGet bool
+		args    []string
+		wantErr string
+	}{
+		{name: "empty term", args: []string{"  "}, wantErr: "search term must not be empty"},
+		{name: "split term", args: []string{"untitled", "workflow"}, wantErr: `Quote TERM if it contains spaces: "untitled workflow"`},
+		{name: "invalid sort", args: []string{"x", "--sort", "size"}, wantErr: "invalid sort"},
+		{name: "path lookup fails", failGet: true, args: []string{"match"}, wantErr: "failed to look up folder"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newSearchServer(t, 3, tt.failGet)
+			defer server.Close()
+
+			stdout, _, err := runSearch(t, server, tt.args...)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+			if stdout != "" {
+				t.Errorf("expected no output on error, got %q", stdout)
+			}
+		})
 	}
 }

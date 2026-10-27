@@ -41,6 +41,8 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newWorkerCmd())
 	cmd.AddCommand(newTemplateCmd())
 	cmd.AddCommand(newWorkflowCmd())
+	cmd.AddCommand(newUploadCmd())
+	cmd.AddCommand(newDownloadCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newSkillCmd())
 
@@ -156,11 +158,12 @@ func formatAndPrint(cmd *cobra.Command, result interface{}) error {
 
 // printTruncationHint tells the user on stderr that a list was truncated.
 // It is only shown for human output so piped and JSON output stay clean.
-func printTruncationHint(cmd *cobra.Command, shown, total int, noun string) {
+// advice tells the user how to see the rest, e.g. "Omit --limit to see all."
+func printTruncationHint(cmd *cobra.Command, shown, total int, noun, advice string) {
 	if quiet || outputFormat != "human" || shown >= total {
 		return
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "\nShowing %d of %d %s. Omit --limit to see all.\n", shown, total, noun)
+	fmt.Fprintf(cmd.ErrOrStderr(), "\nShowing %d of %d %s. %s\n", shown, total, noun, advice)
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

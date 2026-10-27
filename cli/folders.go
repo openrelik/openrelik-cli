@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -21,21 +18,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	maxDepth int
-)
-
 func newFolderCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "folder",
 		Aliases: []string{"folders"},
 		Short:   "Manage folders",
-		Long:    `Create, list, and upload to folders in OpenRelik.`,
+		Long:    `Create, list, and search folders in OpenRelik.`,
 	}
 
 	cmd.AddCommand(newListFoldersCmd())
 	cmd.AddCommand(newCreateFolderCmd())
-	cmd.AddCommand(newUploadCmd())
+	cmd.AddCommand(newSearchFoldersCmd())
 	return cmd
 }
 
@@ -43,9 +36,7 @@ func newFolderCmd() *cobra.Command {
 const folderPageSize = 100
 
 func newListFoldersCmd() *cobra.Command {
-	var limit int
-	var sortBy string
-	var reverse bool
+	var opts listOptions
 
 	cmd := &cobra.Command{
 		Use:     "list [FOLDER]",
@@ -92,11 +83,8 @@ recently updated entries, in the selected sort order.`,
   openrelik folder list 42 --format json | jq '.files[].id'`,
 		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if limit < 0 {
-				return fmt.Errorf("invalid limit: %d (must be 0 or greater)", limit)
-			}
-			if sortBy != "time" && sortBy != "name" {
-				return fmt.Errorf("invalid sort: %q (must be time or name)", sortBy)
+			if err := opts.validate(); err != nil {
+				return err
 			}
 
 			client, err := newClient()
@@ -135,20 +123,42 @@ recently updated entries, in the selected sort order.`,
 			}
 
 			total := len(entries)
-			entries = limitAndSortEntries(entries, limit, sortBy, reverse)
+			entries = limitAndSortEntries(entries, opts.limit, opts.sortBy, opts.reverse)
 
 			if err := formatAndPrint(cmd, &FolderContentsView{Entries: entries}); err != nil {
 				return err
 			}
-			printTruncationHint(cmd, len(entries), total, noun)
+			printTruncationHint(cmd, len(entries), total, noun, "Omit --limit to see all.")
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&sortBy, "sort", "time", "Sort by: time (oldest first) or name")
-	cmd.Flags().BoolVarP(&reverse, "reverse", "r", false, "Reverse the sort order")
-	cmd.Flags().IntVar(&limit, "limit", 0, "Show only the N most recently updated entries (0 shows all)")
+	opts.addFlags(cmd, 0)
 	return cmd
+}
+
+// listOptions holds the sorting and limit flags shared by 'folder list'
+// and 'search'.
+type listOptions struct {
+	sortBy  string
+	reverse bool
+	limit   int
+}
+
+func (o *listOptions) addFlags(cmd *cobra.Command, defaultLimit int) {
+	cmd.Flags().StringVar(&o.sortBy, "sort", "time", "Sort by: time (oldest first) or name")
+	cmd.Flags().BoolVarP(&o.reverse, "reverse", "r", false, "Reverse the sort order")
+	cmd.Flags().IntVar(&o.limit, "limit", defaultLimit, "Show only the N most recently updated entries (0 shows all)")
+}
+
+func (o *listOptions) validate() error {
+	if o.limit < 0 {
+		return fmt.Errorf("invalid limit: %d (must be 0 or greater)", o.limit)
+	}
+	if o.sortBy != "time" && o.sortBy != "name" {
+		return fmt.Errorf("invalid sort: %q (must be time or name)", o.sortBy)
+	}
+	return nil
 }
 
 // folderIDPattern matches arguments that are folder IDs rather than paths.
@@ -431,52 +441,46 @@ or a path of folder names, as accepted by 'folder list'.`,
 	return cmd
 }
 
-func newUploadCmd() *cobra.Command {
-	var folder string
-	var name string
+// searchPathConcurrency is the number of folder lookups run in parallel to
+// find the paths of search results.
+const searchPathConcurrency = 8
+
+func newSearchFoldersCmd() *cobra.Command {
+	var opts listOptions
 
 	cmd := &cobra.Command{
-		Use:   "upload <PATH> [PATH...]",
-		Short: "Upload files and directories",
-		Long: `Upload local files and directories to an OpenRelik folder using resumable
-chunked uploads with progress tracking.
+		Use:   "search <TERM>",
+		Short: "Search folders by name",
+		Long: `Search every folder you can access, including subfolders and folders
+shared with you, for names containing TERM (case-insensitive).
 
-Directories are uploaded recursively up to --depth levels deep, and each
-one is recreated as a folder of the same name in the destination.
+Results show each folder's full path, which can be passed to commands
+that take a folder, such as 'folder list'.
 
-With --folder, uploads go into that existing folder, given as a folder ID
-or a path of folder names as accepted by 'folder list'. Without it, a new
-root folder is created: for a single directory it is named after the
-directory and holds its contents; otherwise it is named after the current
-time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
-		Example: `  # Upload a file to folder 42
-  openrelik folder upload report.pdf --folder 42
+Like 'folder list', results are sorted by last update with the most
+recently updated folder last; use --sort name and -r to change the order.
+By default the 30 most recently updated matches are shown; use --limit N
+to show more, or --limit 0 to show all.`,
+		Example: `  # Find folders with "plaso" in their name
+  openrelik folder search plaso
 
-  # Upload several files to folder 42
-  openrelik folder upload *.E01 --folder 42
+  # Quote terms that contain spaces
+  openrelik folder search "untitled workflow"
 
-  # Upload to a folder by its path
-  openrelik folder upload disk.E01 --folder "Case A/evidence/"
+  # Show all matches, sorted by name
+  openrelik folder search case --limit 0 --sort name
 
-  # Upload a directory into a new root folder named "evidence"
-  openrelik folder upload ./evidence/
-
-  # Upload files into a new root folder with a chosen name
-  openrelik folder upload disk.E01 memory.raw --name "Case 2026-001"
-
-  # Use a larger chunk size (bytes) for fast networks
-  openrelik folder upload large.bin --folder 42 --chunk-size 8388608`,
-		Args:         util.UseArgs(),
+  # Print the IDs of matching folders
+  openrelik folder search evidence --format json | jq '.[].id'`,
+		Args:         util.UseArgsWithQuoteHint(),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Check every path up front so nothing is created for a typo.
-			isDir := make([]bool, len(args))
-			for i, p := range args {
-				info, err := os.Stat(p)
-				if err != nil {
-					return err
-				}
-				isDir[i] = info.IsDir()
+			if err := opts.validate(); err != nil {
+				return err
+			}
+			term := strings.TrimSpace(args[0])
+			if term == "" {
+				return fmt.Errorf("search term must not be empty")
 			}
 
 			client, err := newClient()
@@ -484,116 +488,97 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 				return err
 			}
 
-			view := &UploadView{}
-			if cmd.Flags().Changed("folder") {
-				view.FolderID, err = resolveFolder(cmd.Context(), client, folder)
-				if err != nil {
-					return err
-				}
-			} else {
-				// A single directory becomes the new root folder itself.
-				single := len(args) == 1 && isDir[0]
-				if name == "" {
-					name = defaultUploadFolderName(args, isDir, time.Now())
-				}
-				created, _, err := client.Folders().CreateRootFolder(cmd.Context(), name)
-				if err != nil {
-					return fmt.Errorf("failed to create root folder: %w", err)
-				}
-				view.Created = created
-				view.FolderID = created.ID
-				if single {
-					view.Uploads, err = uploadDirContents(cmd.Context(), cmd.ErrOrStderr(), client, args[0], created.ID, 0)
-					if err != nil {
-						return err
-					}
-					return formatAndPrint(cmd, view)
-				}
+			folders, err := fetchFolderSearch(cmd.Context(), client, term)
+			if err != nil {
+				return err
 			}
 
-			for i, p := range args {
-				var uploads []uploadedFile
-				if isDir[i] {
-					uploads, err = uploadDir(cmd.Context(), cmd.ErrOrStderr(), client, p, view.FolderID)
-				} else {
-					var file *openrelik.File
-					file, err = uploadFileWithProgress(cmd.Context(), cmd.ErrOrStderr(), client, p, view.FolderID)
-					uploads = []uploadedFile{{File: file, FolderID: view.FolderID}}
-				}
-				if err != nil {
-					return err
-				}
-				view.Uploads = append(view.Uploads, uploads...)
+			entries := make([]listEntry, len(folders))
+			for i := range folders {
+				entries[i] = listEntry{folder: &folders[i]}
 			}
-			return formatAndPrint(cmd, view)
+			total := len(entries)
+			entries = limitAndSortEntries(entries, opts.limit, opts.sortBy, opts.reverse)
+
+			// Paths cost one request per folder, so only look up the shown ones.
+			paths, err := fetchFolderPaths(cmd.Context(), client, entries)
+			if err != nil {
+				return err
+			}
+
+			if total == 0 && !quiet && outputFormat == "human" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "No folders match %q.\n", term)
+			}
+			view := &FolderSearchView{}
+			for _, e := range entries {
+				view.Folders = append(view.Folders, searchFolder{Folder: *e.folder, Path: paths[e.folder.ID]})
+			}
+			if err := formatAndPrint(cmd, view); err != nil {
+				return err
+			}
+			printTruncationHint(cmd, len(entries), total, "folders", "Use --limit N to see more, or --limit 0 for all.")
+			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&folder, "folder", "", "ID or path of an existing folder to upload into (default: create a new root folder)")
-	cmd.Flags().StringVar(&name, "name", "", "Name of the new root folder")
-	cmd.Flags().IntVarP(&maxDepth, "depth", "d", 3, "Maximum subfolder depth to upload")
-	cmd.Flags().IntVar(&chunkSize, "chunk-size", 4*1024*1024, "Chunk size in bytes")
-	cmd.MarkFlagsMutuallyExclusive("folder", "name")
+	opts.addFlags(cmd, 30)
 	return cmd
 }
 
-// defaultUploadFolderName names the root folder created by 'folder upload':
-// a single directory keeps its own name, anything else gets a timestamp.
-func defaultUploadFolderName(paths []string, isDir []bool, now time.Time) string {
-	if len(paths) == 1 && isDir[0] {
-		return filepath.Base(filepath.Clean(paths[0]))
-	}
-	return "Upload " + now.Format("2006-01-02 15:04")
-}
-
-// uploadedFile is a file uploaded by 'folder upload' and the folder it went to.
-type uploadedFile struct {
-	File     *openrelik.File `json:"file"`
-	FolderID int             `json:"folder_id"`
-}
-
-// uploadDir recreates localPath as a subfolder of remoteFolderID and uploads
-// its contents into it.
-func uploadDir(ctx context.Context, out io.Writer, client *openrelik.Client, localPath string, remoteFolderID int) ([]uploadedFile, error) {
-	dirName := filepath.Base(filepath.Clean(localPath))
-	folder, _, err := client.Folders().CreateSubFolder(ctx, remoteFolderID, dirName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create subfolder %s: %w", dirName, err)
-	}
-	return uploadDirContents(ctx, out, client, localPath, folder.ID, 0)
-}
-
-// uploadDirContents uploads the contents of localPath into remoteFolderID, recreating
-// subdirectories as subfolders up to maxDepth levels deep.
-func uploadDirContents(ctx context.Context, out io.Writer, client *openrelik.Client, localPath string, remoteFolderID int, depth int) ([]uploadedFile, error) {
-	entries, err := os.ReadDir(localPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read directory %s: %w", localPath, err)
-	}
-
-	var uploads []uploadedFile
-	for _, entry := range entries {
-		entryPath := filepath.Join(localPath, entry.Name())
-		if entry.IsDir() {
-			if depth >= maxDepth {
-				continue
-			}
-			folder, _, err := client.Folders().CreateSubFolder(ctx, remoteFolderID, entry.Name())
-			if err != nil {
-				return nil, fmt.Errorf("failed to create subfolder %s: %w", entry.Name(), err)
-			}
-			sub, err := uploadDirContents(ctx, out, client, entryPath, folder.ID, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			uploads = append(uploads, sub...)
-		} else {
-			file, err := uploadFileWithProgress(ctx, out, client, entryPath, remoteFolderID)
-			if err != nil {
-				return nil, err
-			}
-			uploads = append(uploads, uploadedFile{File: file, FolderID: remoteFolderID})
+// fetchFolderSearch pages through the folder search results for term.
+func fetchFolderSearch(ctx context.Context, client *openrelik.Client, term string) ([]openrelik.Folder, error) {
+	var folders []openrelik.Folder
+	for page := 1; ; page++ {
+		result, _, err := client.Folders().SearchFolders(ctx, term, &openrelik.ListOptions{Page: page, PageSize: folderPageSize})
+		if err != nil {
+			return nil, err
+		}
+		folders = append(folders, result.Folders...)
+		if len(result.Folders) == 0 || len(folders) >= result.TotalCount {
+			return folders, nil
 		}
 	}
-	return uploads, nil
+}
+
+// fetchFolderPaths looks up the full path of each folder entry, keyed by
+// folder ID, running a few lookups at a time.
+func fetchFolderPaths(ctx context.Context, client *openrelik.Client, entries []listEntry) (map[int]string, error) {
+	var (
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		firstErr error
+		paths    = make(map[int]string, len(entries))
+		sem      = make(chan struct{}, searchPathConcurrency)
+	)
+	for _, e := range entries {
+		id := e.folder.ID
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			folder, _, err := client.Folders().Get(ctx, id)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("failed to look up folder %d: %w", id, err)
+				}
+				return
+			}
+			paths[id] = folderPath(folder)
+		}()
+	}
+	wg.Wait()
+	return paths, firstErr
+}
+
+// folderPath builds a folder's path, like "/Case A/evidence/", from its
+// chain of parents.
+func folderPath(f *openrelik.Folder) string {
+	var names []string
+	for ; f != nil; f = f.Parent {
+		names = append([]string{f.DisplayName}, names...)
+	}
+	return formatFolderPath(names)
 }

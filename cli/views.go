@@ -86,6 +86,46 @@ func (v *UploadView) UnwrapJSON() any {
 	}{v.FolderID, v.Created, uploads}
 }
 
+// searchFolder is a folder search result with its full path.
+type searchFolder struct {
+	openrelik.Folder
+	Path string `json:"path"`
+}
+
+// FolderSearchView renders folder search results with their full paths.
+type FolderSearchView struct{ Folders []searchFolder }
+
+func (v *FolderSearchView) RenderHuman(w io.Writer) error {
+	if len(v.Folders) == 0 {
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tPATH\tUPDATED")
+	for _, f := range v.Folders {
+		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.Path, util.FormatTimeAgo(f.UpdatedAt))
+	}
+	return tw.Flush()
+}
+
+// RenderVerbose shows the full folder fields, with the path in place of
+// the display name.
+func (v *FolderSearchView) RenderVerbose(w io.Writer) error {
+	folders := make([]openrelik.Folder, len(v.Folders))
+	for i, f := range v.Folders {
+		folders[i] = f.Folder
+		folders[i].DisplayName = f.Path
+	}
+	util.FprintTable(w, folders)
+	return nil
+}
+
+func (v *FolderSearchView) UnwrapJSON() any {
+	if v.Folders == nil {
+		return []searchFolder{}
+	}
+	return v.Folders
+}
+
 // FolderContentsView renders the subfolders and files of a folder as one
 // table. Folder names get a trailing '/' and TYPE "folder" so they can't be
 // mistaken for files, since folder and file IDs are separate.

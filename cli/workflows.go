@@ -66,7 +66,7 @@ immediately after creation.`,
 			var parsedParams map[string]any
 			if params != "" {
 				if err := json.Unmarshal([]byte(params), &parsedParams); err != nil {
-					return fmt.Errorf("invalid JSON for --params: %w", err)
+					return usageErrorf("invalid JSON for --params: %w", err)
 				}
 			}
 
@@ -96,11 +96,13 @@ immediately after creation.`,
 		},
 	}
 
-	cmd.Flags().IntVarP(&folderID, "folder", "f", 0, "Folder ID (optional, resolved from first file if omitted)")
-	cmd.Flags().IntSliceVarP(&fileIDs, "file", "i", nil, "File IDs to include (can be specified multiple times)")
-	cmd.Flags().IntVarP(&templateID, "template", "t", 0, "Template ID to use")
-	cmd.Flags().StringVarP(&params, "params", "p", "", "JSON string of parameters")
-	cmd.Flags().BoolVarP(&runAfter, "run", "r", false, "Run the workflow immediately after creation")
+	// No short flags: -f, -p and -r mean --force, --parent and --reverse
+	// elsewhere.
+	cmd.Flags().IntVar(&folderID, "folder", 0, "Folder ID (optional, resolved from first file if omitted)")
+	cmd.Flags().IntSliceVar(&fileIDs, "file", nil, "File IDs to include (can be specified multiple times)")
+	cmd.Flags().IntVar(&templateID, "template", 0, "Template ID to use")
+	cmd.Flags().StringVar(&params, "params", "", "JSON string of parameters")
+	cmd.Flags().BoolVar(&runAfter, "run", false, "Run the workflow immediately after creation")
 
 	_ = cmd.MarkFlagRequired("template")
 
@@ -130,7 +132,7 @@ and --format json for the full workflow, including its spec.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wID, err := strconv.Atoi(args[0])
 			if err != nil {
-				return fmt.Errorf("invalid workflow ID: %w", err)
+				return usageErrorf("invalid workflow ID: %w", err)
 			}
 
 			client, err := newClient()
@@ -165,7 +167,7 @@ WORKFLOW_ID is the integer ID of the workflow.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wID, err := strconv.Atoi(args[0])
 			if err != nil {
-				return fmt.Errorf("invalid workflow ID: %w", err)
+				return usageErrorf("invalid workflow ID: %w", err)
 			}
 
 			client, err := newClient()
@@ -224,7 +226,7 @@ monitor progress after starting.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wID, err := strconv.Atoi(args[0])
 			if err != nil {
-				return fmt.Errorf("invalid workflow ID: %w", err)
+				return usageErrorf("invalid workflow ID: %w", err)
 			}
 
 			client, err := newClient()
@@ -254,7 +256,7 @@ monitor progress after starting.`,
 		},
 	}
 
-	cmd.Flags().StringVarP(&spec, "spec", "s", "", "JSON string of workflow specification")
+	cmd.Flags().StringVar(&spec, "spec", "", "JSON string of workflow specification")
 	return cmd
 }
 
@@ -411,7 +413,7 @@ nothing is downloaded.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wID, err := strconv.Atoi(args[0])
 			if err != nil || wID <= 0 {
-				return fmt.Errorf("invalid workflow ID: %q", args[0])
+				return usageErrorf("invalid workflow ID: %q", args[0])
 			}
 			dir := "."
 			if len(args) > 1 {
@@ -430,7 +432,7 @@ nothing is downloaded.`,
 			if all {
 				policy = "all"
 			}
-			saved, _, err := util.DownloadResults(cmd.Context(), client, wID, policy, nil, dir, taskFolders, outputFormat, !quiet)
+			saved, _, err := util.DownloadResults(cmd.Context(), client, wID, policy, nil, dir, taskFolders, !quiet)
 			if errors.Is(err, util.ErrFinalTasksUnknown) {
 				return fmt.Errorf("%w; use --all to download the results of every task", err)
 			}

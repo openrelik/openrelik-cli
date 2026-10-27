@@ -205,7 +205,6 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 	runCmd := &cobra.Command{Use: "run"}
 	runCmd.PersistentFlags().StringP("output-dir", "o", ".", "")
 	runCmd.PersistentFlags().String("download", "final", "")
-	runCmd.PersistentFlags().Bool("no-download", false, "")
 	runCmd.PersistentFlags().Bool("task-folders", false, "")
 	runCmd.PersistentFlags().Bool("dry-run", false, "")
 
@@ -250,9 +249,9 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 		}
 	})
 
-	t.Run("NoDownload", func(t *testing.T) {
+	t.Run("DownloadNone", func(t *testing.T) {
 		segments := [][]string{
-			{"worker1", "--no-download"},
+			{"worker1", "--download", "none"},
 		}
 		_, _, _, meta, err := BuildWorkflowSpec(runCmd, segments, "--then", allWorkers, createWorkerCmd)
 		if err != nil {

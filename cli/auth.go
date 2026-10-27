@@ -82,7 +82,7 @@ saved login.`,
 				server = args[0]
 			} else {
 				if keyStdin {
-					return errors.New("--api-key-stdin needs SERVER, since the key takes up stdin")
+					return usageErrorf("--api-key-stdin needs SERVER, since the key takes up stdin")
 				}
 				fmt.Fprint(cmd.ErrOrStderr(), "OpenRelik Server URL (e.g., http://localhost:8710): ")
 				line, _ := in.ReadString('\n')
@@ -278,7 +278,7 @@ to ask on, the command fails instead. Use 'auth login' to add a server.`,
 				line, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 				arg = strings.TrimSpace(line)
 				if _, err := strconv.Atoi(arg); err != nil {
-					return fmt.Errorf("invalid input: %q is not a number", arg)
+					return usageErrorf("invalid input: %q is not a number", arg)
 				}
 			}
 			i, err := findServer(settings, arg)
@@ -303,7 +303,7 @@ to ask on, the command fails instead. Use 'auth login' to add a server.`,
 func normalizeServerURL(server string) (string, error) {
 	u, err := url.Parse(server)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("invalid server URL %q: give a URL such as https://openrelik.example.org", server)
+		return "", usageErrorf("invalid server URL %q: give a URL such as https://openrelik.example.org", server)
 	}
 	return strings.TrimRight(server, "/"), nil
 }
@@ -313,7 +313,7 @@ func normalizeServerURL(server string) (string, error) {
 func findServer(settings *config.Settings, arg string) (int, error) {
 	if n, err := strconv.Atoi(arg); err == nil {
 		if n < 1 || n > len(settings.Servers) {
-			return 0, fmt.Errorf("invalid choice %d: there are %d saved servers (see 'openrelik auth list')", n, len(settings.Servers))
+			return 0, usageErrorf("invalid choice %d: there are %d saved servers (see 'openrelik auth list')", n, len(settings.Servers))
 		}
 		return n - 1, nil
 	}
@@ -363,7 +363,7 @@ func serverArgs(args []string) ([]string, error) {
 		return []string{serverURL}, nil
 	}
 	if strings.TrimRight(args[0], "/") != strings.TrimRight(serverURL, "/") {
-		return nil, fmt.Errorf("SERVER %q and --server %q differ; give only one", args[0], serverURL)
+		return nil, usageErrorf("SERVER %q and --server %q differ; give only one", args[0], serverURL)
 	}
 	return args, nil
 }
@@ -402,9 +402,9 @@ API key is set, or if the server doesn't accept the key.`,
 			var checkErr error
 			switch {
 			case c.ServerURL == "":
-				checkErr = errors.New("no server is set; run 'openrelik auth login' or set OPENRELIK_SERVER_URL")
+				checkErr = &credentialsError{"no server is set; run 'openrelik auth login' or set OPENRELIK_SERVER_URL"}
 			case c.APIKey == "":
-				checkErr = fmt.Errorf("no API key is set for %s; run 'openrelik auth login' or set OPENRELIK_API_KEY", c.ServerURL)
+				checkErr = &credentialsError{fmt.Sprintf("no API key is set for %s; run 'openrelik auth login' or set OPENRELIK_API_KEY", c.ServerURL)}
 			default:
 				var client *openrelik.Client
 				client, checkErr = NewAPIClient()

@@ -87,7 +87,19 @@ These flags apply to all commands:
 *   `--server`: Use this server instead of the active one, with the API key saved for it (or `OPENRELIK_API_KEY`).
 *   `--debug`: Show errors from the server as they were received, with the request that failed, instead of a plain description.
 
-Ctrl-C stops a command cleanly (a second Ctrl-C ends it at once), and an interrupted command exits with status 130. Interrupting `run` doesn't stop the workflow on the server; the message says how to follow it.
+Ctrl-C stops a command cleanly (a second Ctrl-C ends it at once). Interrupting `run` doesn't stop the workflow on the server; the message says how to follow it.
+
+### Exit Status
+
+| Status | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Any other error, including a workflow that failed |
+| 2 | The command line is wrong: an unknown command or flag, missing or extra arguments, or an invalid value |
+| 3 | A file, folder, workflow or other resource doesn't exist |
+| 4 | No server or API key is set, the server didn't accept the API key, or permission was denied |
+| 5 | The server can't be reached or failed to handle the request; worth retrying |
+| 130 | Interrupted with Ctrl-C |
 
 Progress bars and colours are only shown when stderr is a terminal. Set `NO_COLOR` to turn colours off; with `TERM=dumb`, progress is written as one line per transfer.
 
@@ -129,8 +141,8 @@ openrelik user me --format json
 Organize files in hierarchical directories.
 
 *   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"` (a leading `/`, as `folder search` prints paths, is optional); an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
-*   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list`, `upload` and `folder create --parent`. Shows the 30 most recently updated matches by default; use `--limit N` to show more or `--limit 0` for all. `--sort` and `-r` work as in `folder list`. Use `--latest` to show only the most recently updated match, and `--root` to search only root folders (and folders shared with you).
-*   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name; use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes.
+*   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list`, `upload` and `folder create --parent`. All matches are shown; use `--limit N` to show only the N most recently updated. `--sort` and `-r` work as in `folder list`. Use `--latest` to show only the most recently updated match, and `--root` to search only root folders (and folders shared with you).
+*   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name like `tree`, so the structure is easy to scan (`folder list` and `folder search` sort by last update like `ls -latr`, so the latest work is shown last); use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes.
 *   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder. Use `--exist-ok` to print an existing folder with the same name in that location instead of creating a duplicate, which makes scripts safe to re-run. If several such folders exist it fails and lists them; add `--latest` to use the most recently updated one.
 
 #### Examples
@@ -235,6 +247,7 @@ Run workers on files. The CLI generates a subcommand for each worker from the lo
 *   Use `--then` to chain workers sequentially (passing output from one to the next).
 *   Use `--and` to run workers in parallel.
 *   Use `--dry-run` to output the generated JSON workflow specification without executing it.
+*   Use `--download final|all|none` to choose which results are downloaded (default `final`), and `--download-result` or `--no-download-result` after a worker to override that for the worker's task. `--no-download` was removed; use `--download none`.
 
 #### Examples
 

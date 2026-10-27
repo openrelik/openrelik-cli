@@ -165,9 +165,8 @@ func ResolveInputs(ctx context.Context, client *openrelik.Client, args []string,
 }
 
 // DownloadResults fetches the full workflow details and downloads the requested output files.
-// It returns the files it saved.
-func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID int, policy string, taskDownloadPrefs map[string]bool, outputDir string, taskFolders bool, outputFormat string, showProgress bool) ([]*SavedFile, *openrelik.Workflow, error) {
-	var fullWorkflow *openrelik.Workflow
+// It returns the files it saved and the workflow, which callers also print.
+func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID int, policy string, taskDownloadPrefs map[string]bool, outputDir string, taskFolders bool, showProgress bool) ([]*SavedFile, *openrelik.Workflow, error) {
 	var saved []*SavedFile
 
 	hasPositiveOverride := false
@@ -178,16 +177,13 @@ func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID i
 		}
 	}
 
-	if policy != "none" || outputFormat != "text" || hasPositiveOverride {
-		// The status endpoint doesn't include output_files; fetch the full workflow.
-		var err error
-		fullWorkflow, _, err = client.Workflows().Get(ctx, workflowID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to fetch workflow details: %w", err)
-		}
+	// The status endpoint doesn't include output_files; fetch the full workflow.
+	fullWorkflow, _, err := client.Workflows().Get(ctx, workflowID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch workflow details: %w", err)
 	}
 
-	if (policy == "none" && !hasPositiveOverride) || fullWorkflow == nil {
+	if policy == "none" && !hasPositiveOverride {
 		return nil, fullWorkflow, nil
 	}
 

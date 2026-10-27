@@ -71,7 +71,11 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newSkillCmd())
 
 	requireKnownSubcommands(cmd)
+	markUsageErrors(cmd)
 	friendlyErrors(cmd)
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return &usageError{fmt.Errorf("%w\n\nRun '%s --help' for usage.", err, c.CommandPath())}
+	})
 	return cmd
 }
 
@@ -161,10 +165,10 @@ func resolveCredentials() credentials {
 var NewAPIClient = func() (*openrelik.Client, error) {
 	c := resolveCredentials()
 	if c.ServerURL == "" {
-		return nil, fmt.Errorf("server URL is required (use --server or the OPENRELIK_SERVER_URL env var, or run 'openrelik auth login')")
+		return nil, &credentialsError{"server URL is required (use --server or the OPENRELIK_SERVER_URL env var, or run 'openrelik auth login')"}
 	}
 	if c.APIKey == "" {
-		return nil, fmt.Errorf("API key is required (use OPENRELIK_API_KEY env var, or run 'openrelik auth login')")
+		return nil, &credentialsError{"API key is required (use OPENRELIK_API_KEY env var, or run 'openrelik auth login')"}
 	}
 	return openrelik.NewClient(c.ServerURL, c.APIKey)
 }
@@ -236,8 +240,8 @@ func Execute() {
 		} else {
 			fmt.Fprintf(os.Stderr, "Interrupted: %v\n", err)
 		}
-		os.Exit(130)
+		os.Exit(exitInterrupted)
 	}
 	fmt.Fprintln(os.Stderr, err)
-	os.Exit(1)
+	os.Exit(exitCode(err))
 }

@@ -71,10 +71,10 @@ hasn't hashed (yet) are reported as not verified.`,
 		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if maxDepth < 0 {
-				return fmt.Errorf("invalid depth: %d (must be 0 or greater)", maxDepth)
+				return usageErrorf("invalid depth: %d (must be 0 or greater)", maxDepth)
 			}
 			if chunkSize <= 0 {
-				return fmt.Errorf("invalid chunk size: %d (must be greater than 0)", chunkSize)
+				return usageErrorf("invalid chunk size: %d (must be greater than 0)", chunkSize)
 			}
 
 			// With more than one argument, the last is the destination folder.
@@ -125,7 +125,7 @@ hasn't hashed (yet) are reported as not verified.`,
 				if err != nil {
 					// The user may have left out the destination, so the
 					// last file was taken as the folder.
-					var notFound folderNotFoundError
+					var notFound notFoundError
 					if _, statErr := os.Stat(dest); statErr == nil && errors.As(err, &notFound) {
 						return fmt.Errorf("%w\n\nThe last argument is the folder to upload into, but %q is also a local path. Add the destination folder at the end, or \"/\" to create a new root folder.", err, dest)
 					}
@@ -198,7 +198,7 @@ hasn't hashed (yet) are reported as not verified.`,
 	}
 
 	cmd.Flags().StringVar(&name, "name", "", `Name of the new root folder (only with no FOLDER, or FOLDER "/")`)
-	cmd.Flags().BoolVar(&force, "force", false, "Upload files even if FOLDER already holds the same file")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Upload files even if FOLDER already holds the same file")
 	cmd.Flags().IntVarP(&maxDepth, "depth", "d", 0, "Maximum subfolder depth to upload (0 uploads all levels)")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 4*1024*1024, "Chunk size in bytes")
 	removedFlag(cmd, "folder", "openrelik upload <PATH>... <FOLDER>")

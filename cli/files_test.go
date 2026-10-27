@@ -456,7 +456,8 @@ Updated        2026-10-01T07:01:30Z (` + age + `)
 	})
 
 	t.Run("deleted", func(t *testing.T) {
-		v := &FileInfoView{&openrelik.File{ID: 1, IsDeleted: true, DeletedAt: &updated}}
+		deleted := true
+		v := &FileInfoView{&openrelik.File{ID: 1, IsDeleted: &deleted, DeletedAt: &updated}}
 		var b strings.Builder
 		v.RenderHuman(&b)
 		if !strings.Contains(b.String(), "Deleted  yes, 2026-10-01T07:01:30Z (") {

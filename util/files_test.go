@@ -202,7 +202,7 @@ func TestDownloadResults(t *testing.T) {
 	t.Run("Download all", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		client := resultsServer(t, oneTask, helloSHA256)
-		saved, _, err := DownloadResults(ctx, client, 100, "all", nil, tmpDir, false, "text", false)
+		saved, _, err := DownloadResults(ctx, client, 100, "all", nil, tmpDir, false, false)
 		if err != nil {
 			t.Fatalf("DownloadResults failed: %v", err)
 		}
@@ -222,7 +222,7 @@ func TestDownloadResults(t *testing.T) {
 
 	t.Run("Download none", func(t *testing.T) {
 		client := resultsServer(t, oneTask, helloSHA256)
-		saved, _, err := DownloadResults(ctx, client, 100, "none", nil, t.TempDir(), false, "text", false)
+		saved, _, err := DownloadResults(ctx, client, 100, "none", nil, t.TempDir(), false, false)
 		if err != nil {
 			t.Fatalf("DownloadResults failed: %v", err)
 		}
@@ -293,7 +293,7 @@ func TestDownloadResults(t *testing.T) {
 				os.WriteFile(filepath.Join(outDir, tt.existing), []byte("original"), 0o644)
 			}
 			client := resultsServer(t, tt.tasks, tt.sha256)
-			_, _, err := DownloadResults(ctx, client, 100, "all", nil, outDir, tt.taskFolders, "text", false)
+			_, _, err := DownloadResults(ctx, client, 100, "all", nil, outDir, tt.taskFolders, false)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)

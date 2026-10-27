@@ -161,7 +161,7 @@ func (v *FileInfoView) RenderHuman(w io.Writer) error {
 	}
 	fmt.Fprintf(tw, "Created\t%s\n", util.FormatTimeWithAge(v.CreatedAt))
 	fmt.Fprintf(tw, "Updated\t%s\n", util.FormatTimeWithAge(v.UpdatedAt))
-	if v.IsDeleted {
+	if v.IsDeleted != nil && *v.IsDeleted {
 		deleted := "yes"
 		if v.DeletedAt != nil {
 			deleted += ", " + util.FormatTimeWithAge(*v.DeletedAt)
@@ -502,7 +502,9 @@ func (v *UserMeView) RenderHuman(w io.Writer) error {
 	if v.AuthMethod != "" {
 		fmt.Fprintf(tw, "Auth Method\t%s\n", v.AuthMethod)
 	}
-	fmt.Fprintf(tw, "Admin\t%v\n", v.IsAdmin)
+	if v.IsAdmin != nil {
+		fmt.Fprintf(tw, "Admin\t%v\n", *v.IsAdmin)
+	}
 	return tw.Flush()
 }
 

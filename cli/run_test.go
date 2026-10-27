@@ -277,6 +277,9 @@ func TestRunFailedWorkflow(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "workflow 100 failed") {
 		t.Fatalf("expected error containing %q, got %v", "workflow 100 failed", err)
 	}
+	if code := exitCode(err); code != exitError {
+		t.Errorf("exit code %d for a failed workflow, want %d", code, exitError)
+	}
 	if got, _ := os.ReadFile(filepath.Join(outDir, "partial.txt")); string(got) != "partial" {
 		t.Errorf("expected the results to be downloaded, got %q", got)
 	}

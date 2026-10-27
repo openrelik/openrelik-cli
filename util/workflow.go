@@ -352,9 +352,6 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 	// Initialize with defaults from runCmd
 	if runCmd != nil {
 		meta.DownloadPolicy, _ = runCmd.Flags().GetString("download")
-		if noDownload, _ := runCmd.Flags().GetBool("no-download"); noDownload {
-			meta.DownloadPolicy = "none"
-		}
 		meta.OutputDir, _ = runCmd.Flags().GetString("output-dir")
 		meta.TaskFolders, _ = runCmd.Flags().GetBool("task-folders")
 		meta.UploadFolderID, _ = runCmd.Flags().GetInt("upload-folder-id")
@@ -395,9 +392,6 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 		// Collect global overrides from this segment.
 		if tempCmd.Flags().Changed("download") {
 			meta.DownloadPolicy, _ = tempCmd.Flags().GetString("download")
-		}
-		if noDownload, _ := tempCmd.Flags().GetBool("no-download"); noDownload {
-			meta.DownloadPolicy = "none"
 		}
 		if tempCmd.Flags().Changed("output-dir") {
 			meta.OutputDir, _ = tempCmd.Flags().GetString("output-dir")

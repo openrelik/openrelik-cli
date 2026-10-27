@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/openrelik/openrelik-cli/config"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 func TestNewClient(t *testing.T) {
@@ -202,5 +205,41 @@ func TestFormatFlag(t *testing.T) {
 	NewRootCmd()
 	if outputFormat != "human" {
 		t.Errorf("outputFormat = %q after NewRootCmd, want human", outputFormat)
+	}
+}
+
+// TestShortFlagsHaveOneMeaning checks that a short flag means the same long
+// flag everywhere in the command tree, so -f is always --force.
+func TestShortFlagsHaveOneMeaning(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+
+	seen := map[string]string{} // shorthand -> "long (first command)"
+	var walk func(*cobra.Command)
+	walk = func(cmd *cobra.Command) {
+		cmd.Flags().VisitAll(func(f *pflag.Flag) {
+			if f.Shorthand == "" {
+				return
+			}
+			if prev, ok := seen[f.Shorthand]; ok {
+				if long, _, _ := strings.Cut(prev, " "); long != f.Name {
+					t.Errorf("-%s is --%s in %q but %s", f.Shorthand, f.Name, cmd.CommandPath(), prev)
+				}
+				return
+			}
+			seen[f.Shorthand] = fmt.Sprintf("%s (in %q)", f.Name, cmd.CommandPath())
+		})
+		for _, c := range cmd.Commands() {
+			walk(c)
+		}
+	}
+	walk(NewRootCmd())
+
+	for path, short := range map[string]string{"upload": "f", "download": "f"} {
+		root := NewRootCmd()
+		cmd, _, err := root.Find([]string{path})
+		if err != nil || cmd.Flags().ShorthandLookup(short) == nil {
+			t.Errorf("expected -%s on %s", short, path)
+		}
 	}
 }

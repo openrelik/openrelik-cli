@@ -236,18 +236,18 @@ func resolveFile(ctx context.Context, client *openrelik.Client, arg string) (int
 	if folderIDPattern.MatchString(arg) {
 		id, err := strconv.Atoi(arg)
 		if err != nil || id == 0 {
-			return 0, fmt.Errorf("invalid file ID: %s", arg)
+			return 0, usageErrorf("invalid file ID: %s", arg)
 		}
 		return id, nil
 	}
 
 	i := strings.LastIndex(arg, "/")
 	if i < 0 || strings.Trim(arg[:i], "/") == "" {
-		return 0, fmt.Errorf("invalid file %q: give a file ID or a path such as 'FOLDER/NAME'", arg)
+		return 0, usageErrorf("invalid file %q: give a file ID or a path such as 'FOLDER/NAME'", arg)
 	}
 	dir, name := arg[:i], arg[i+1:]
 	if name == "" {
-		return 0, fmt.Errorf("invalid file %q: the path ends in '/', so it names a folder", arg)
+		return 0, usageErrorf("invalid file %q: the path ends in '/', so it names a folder", arg)
 	}
 
 	folderID, err := resolveFolderPath(ctx, client, dir)
@@ -275,7 +275,7 @@ func resolveFile(ctx context.Context, client *openrelik.Client, arg string) (int
 
 	switch len(matches) {
 	case 0:
-		return 0, fmt.Errorf("no file named %q in %s/", name, strings.TrimRight(dir, "/"))
+		return 0, notFoundError(fmt.Sprintf("no file named %q in %s/", name, strings.TrimRight(dir, "/")))
 	case 1:
 		return matches[0].ID, nil
 	default:

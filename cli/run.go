@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/openrelik/openrelik-cli/config"
@@ -56,6 +57,10 @@ Run workers in parallel with --and (both receive the same input files):
 When the workflow finishes, the output files of the final tasks are
 downloaded: the end of a chain, or every worker run with --and. Use
 --download all for the output files of every task, or --download none.
+After a worker, --download-result or --no-download-result overrides this
+for that worker's task:
+
+  openrelik run strings --download-result --then grep --regex "password" 123
 
 Use --dry-run to preview the generated workflow spec without executing it.
 A dry run doesn't contact the server, and uses the cached list of workers.`,
@@ -64,8 +69,10 @@ A dry run doesn't contact the server, and uses the cached list of workers.`,
 
 	// Global run flags
 	runCmd.PersistentFlags().StringP("output-dir", "o", ".", "Output directory for downloads")
-	runCmd.PersistentFlags().String("download", "final", "Download policy (final, all, none)")
-	runCmd.PersistentFlags().Bool("no-download", false, "Do not download any results")
+	runCmd.PersistentFlags().String("download", "final", "Results to download: final (the final tasks' output), all, or none")
+	// Removed in favour of --download none; kept hidden to say so.
+	runCmd.PersistentFlags().Bool("no-download", false, "")
+	runCmd.PersistentFlags().MarkHidden("no-download")
 	runCmd.PersistentFlags().Bool("task-folders", false, "Organize downloads into task folders")
 	runCmd.PersistentFlags().Int("upload-folder-id", 0, "Folder ID to upload local files to")
 	runCmd.PersistentFlags().String("upload-folder-name", "", "Folder name to upload local files to (default: CLI Uploads (username))")
@@ -97,7 +104,7 @@ A dry run doesn't contact the server, and uses the cached list of workers.`,
 		if util.FindWorker(name, workers) != nil {
 			return fmt.Errorf("%q was registered since the list of workers was last updated; run the command again", name)
 		}
-		return fmt.Errorf("unknown worker %q (see 'openrelik worker list')", name)
+		return usageErrorf("unknown worker %q (see 'openrelik worker list')", name)
 	}
 
 	defaultHelp := runCmd.HelpFunc()
@@ -126,6 +133,21 @@ A dry run doesn't contact the server, and uses the cached list of workers.`,
 // helpRefreshTimeout limits how long 'run --help' waits for the server to
 // list its workers.
 const helpRefreshTimeout = 5 * time.Second
+
+// checkRemovedRunFlags fails if a removed flag of 'run' is used, either
+// before the worker (parsed by 'run') or among the worker's own arguments.
+func checkRemovedRunFlags(cmd *cobra.Command, args []string) error {
+	used := cmd.Flags().Changed("no-download")
+	for _, arg := range args {
+		if arg == "--no-download" || strings.HasPrefix(arg, "--no-download=") {
+			used = true
+		}
+	}
+	if used {
+		return usageErrorf("'run --no-download' was removed. Use instead:\n\n  --download none")
+	}
+	return nil
+}
 
 // addWorkerCmds replaces the worker subcommands of runCmd.
 func addWorkerCmds(runCmd *cobra.Command, workers []openrelik.Worker) {
@@ -163,6 +185,10 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 		Long:               worker.Description,
 		DisableFlagParsing: true, // We will parse flags manually for each segment
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := checkRemovedRunFlags(cmd, args); err != nil {
+				return err
+			}
+
 			// Slice arguments by --then or --and
 			segments, delimiter, err := util.SliceArgs(cmd.Name(), args, "--then", "--and")
 			if err != nil {
@@ -223,7 +249,7 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			showProgress := !quiet && !outputSpecified
 
 			if downloadPolicy != "all" && downloadPolicy != "final" && downloadPolicy != "none" {
-				return fmt.Errorf("invalid download policy: %s (must be 'all', 'final', or 'none')", downloadPolicy)
+				return usageErrorf("invalid download policy: %s (must be 'all', 'final', or 'none')", downloadPolicy)
 			}
 
 			// Check the inputs before anything is created or previewed.
@@ -325,7 +351,7 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			var fullWorkflow *openrelik.Workflow
 			var saved []*util.SavedFile
 			if lastStatus != nil {
-				saved, fullWorkflow, err = util.DownloadResults(cmd.Context(), client, workflow.ID, downloadPolicy, taskDownloadPrefs, outputDir, taskFolders, outputFormat, showProgress)
+				saved, fullWorkflow, err = util.DownloadResults(cmd.Context(), client, workflow.ID, downloadPolicy, taskDownloadPrefs, outputDir, taskFolders, showProgress)
 				if errors.Is(err, util.ErrFinalTasksUnknown) {
 					err = fmt.Errorf("%w; get all results with 'openrelik workflow download %d --all'", err, workflow.ID)
 				}
@@ -379,8 +405,8 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 	}
 
 	// Every worker command also gets its own download override flags
-	cmd.Flags().Bool("download-result", false, "Download results for this task")
-	cmd.Flags().Bool("no-download-result", false, "Do not download results for this task")
+	cmd.Flags().Bool("download-result", false, "Download this task's output, whatever --download says")
+	cmd.Flags().Bool("no-download-result", false, "Don't download this task's output, whatever --download says")
 
 	return cmd
 }

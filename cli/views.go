@@ -419,6 +419,11 @@ func (v *SharedFoldersView) RenderHuman(w io.Writer) error {
 	return tw.Flush()
 }
 
+func (v *SharedFoldersView) RenderVerbose(w io.Writer) error {
+	util.FprintTable(w, v.contents().Folders)
+	return nil
+}
+
 // ShareResultView renders what 'folder share' or 'folder unshare' did for
 // each user and group. Failures aren't listed in human output, since the
 // error lists them.

@@ -38,8 +38,9 @@ func newLoginCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "login",
 		Short: "Login to OpenRelik",
-		Long: `Interactively prompt for a server URL and API key, then save them to
-~/.openrelik/ for use by all subsequent commands.
+		Long: `Interactively prompt for a server URL and API key, check that the server
+accepts the key, then save them to ~/.openrelik/ for use by all subsequent
+commands. If the login fails, nothing is saved.
 
 As an alternative to interactive login, set the OPENRELIK_SERVER_URL and
 OPENRELIK_API_KEY environment variables — they take precedence over the
@@ -73,6 +74,17 @@ stored credentials.`,
 
 			if key == "" {
 				return fmt.Errorf("API key is required")
+			}
+
+			// Check the login before saving anything, so a typo in the URL
+			// or key doesn't replace working credentials.
+			client, err := openrelik.NewClient(server, key)
+			if err != nil {
+				return fmt.Errorf("could not log in to %s: %w\nNothing was saved.", server, err)
+			}
+			user, _, err := client.Users().GetMe(cmd.Context())
+			if err != nil {
+				return fmt.Errorf("could not log in to %s: %w\nNothing was saved.", server, err)
 			}
 
 			settings, err := config.LoadSettings()
@@ -120,7 +132,7 @@ stored credentials.`,
 				return fmt.Errorf("error saving credentials: %w", err)
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), "Successfully logged in!")
+			fmt.Fprintf(cmd.OutOrStdout(), "Logged in to %s as %s\n", server, user.Username)
 			return nil
 		},
 	}

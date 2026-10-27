@@ -11,6 +11,27 @@ import (
 	"github.com/openrelik/openrelik-cli/config"
 )
 
+// newMeServer is a mock API whose /users/me endpoint accepts only
+// acceptedKey, as the user "analyst".
+func newMeServer(t *testing.T, acceptedKey string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/users/me/" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("x-openrelik-refresh-token") != acceptedKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"detail": "Invalid token"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id": 4, "username": "analyst"}`)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func TestLoginCmd(t *testing.T) {
 	// Setup temp config dir
 	tmpDir := t.TempDir()
@@ -23,6 +44,8 @@ func TestLoginCmd(t *testing.T) {
 		return []byte("test-api-key"), nil
 	}
 	defer func() { passwordReader = originalPasswordReader }()
+	testServer := newMeServer(t, "test-api-key").URL
+	newServer := newMeServer(t, "test-api-key").URL
 
 	t.Run("SuccessfulLogin", func(t *testing.T) {
 		root := NewRootCmd()
@@ -32,7 +55,7 @@ func TestLoginCmd(t *testing.T) {
 		root.SetIn(in)
 
 		// Provide input for server URL
-		in.WriteString("http://test-server\n")
+		in.WriteString(testServer + "\n")
 
 		root.SetArgs([]string{"auth", "login"})
 
@@ -40,22 +63,22 @@ func TestLoginCmd(t *testing.T) {
 			t.Fatalf("Execute() failed: %v", err)
 		}
 
-		if !bytes.Contains(out.Bytes(), []byte("Successfully logged in!")) {
+		if !bytes.Contains(out.Bytes(), []byte("Logged in to "+testServer+" as analyst\n")) {
 			t.Errorf("expected output to contain success message, got %q", out.String())
 		}
 
 		// Verify config was saved
 		s, _ := config.LoadSettings()
 		active := s.GetActiveServer()
-		if active == nil || active.URL != "http://test-server" {
-			t.Errorf("expected server URL %q, got %+v", "http://test-server", active)
+		if active == nil || active.URL != testServer {
+			t.Errorf("expected server URL %q, got %+v", testServer, active)
 		}
-		if s.ActiveServer != "http://test-server" {
-			t.Errorf("expected active server %q, got %q", "http://test-server", s.ActiveServer)
+		if s.ActiveServer != testServer {
+			t.Errorf("expected active server %q, got %q", testServer, s.ActiveServer)
 		}
 		c, _ := config.LoadCredentials()
-		if c.APIKeys["http://test-server"] != "test-api-key" {
-			t.Errorf("expected API key %q, got %q", "test-api-key", c.APIKeys["http://test-server"])
+		if c.APIKeys[testServer] != "test-api-key" {
+			t.Errorf("expected API key %q, got %q", "test-api-key", c.APIKeys[testServer])
 		}
 	})
 
@@ -73,7 +96,7 @@ func TestLoginCmd(t *testing.T) {
 		root.SetOut(out)
 		root.SetIn(in)
 
-		in.WriteString("http://new-server\n")
+		in.WriteString(newServer + "\n")
 		root.SetArgs([]string{"auth", "login"})
 
 		if err := root.Execute(); err != nil {
@@ -84,8 +107,8 @@ func TestLoginCmd(t *testing.T) {
 		if len(s.Servers) != 2 {
 			t.Errorf("expected 2 servers, got %d", len(s.Servers))
 		}
-		if s.ActiveServer != "http://new-server" {
-			t.Errorf("expected active server to be http://new-server, got %s", s.ActiveServer)
+		if s.ActiveServer != newServer {
+			t.Errorf("expected active server to be %s, got %s", newServer, s.ActiveServer)
 		}
 	})
 
@@ -195,20 +218,7 @@ func TestLoginCmd(t *testing.T) {
 }
 
 func TestAuthStatus(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/users/me/" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.Header.Get("x-openrelik-refresh-token") != "good-key" {
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, `{"detail": "Invalid token"}`)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"id": 4, "username": "analyst"}`)
-	}))
-	defer server.Close()
+	server := newMeServer(t, "good-key")
 
 	tests := []struct {
 		name        string
@@ -301,6 +311,61 @@ func TestAuthStatus(t *testing.T) {
 			}
 			if out.String() != want {
 				t.Errorf("output:\n%s\nwant:\n%s", out.String(), want)
+			}
+		})
+	}
+}
+
+// TestLoginFailureSavesNothing checks that a login the server doesn't
+// accept, or a server that can't be reached, leaves the existing
+// credentials alone.
+func TestLoginFailureSavesNothing(t *testing.T) {
+	server := newMeServer(t, "good-key")
+	unreachable := httptest.NewServer(http.NotFoundHandler())
+	unreachable.Close()
+
+	tests := []struct {
+		name    string
+		url     string
+		key     string
+		wantErr string
+	}{
+		{name: "rejected key", url: server.URL, key: "bad-key", wantErr: "could not log in to " + server.URL},
+		{name: "unreachable server", url: unreachable.URL, key: "good-key", wantErr: "could not log in to " + unreachable.URL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config.SetBaseDir(t.TempDir())
+			defer config.SetBaseDir("")
+			// A working login that must survive the failed one.
+			config.SaveSettings(&config.Settings{ActiveServer: "http://working", Servers: []config.ServerConfig{{URL: "http://working"}}})
+			config.SaveCredentials(&config.Credentials{APIKeys: map[string]string{"http://working": "working-key"}})
+
+			orig := passwordReader
+			passwordReader = func(int) ([]byte, error) { return []byte(tt.key), nil }
+			defer func() { passwordReader = orig }()
+
+			root := NewRootCmd()
+			out := new(bytes.Buffer)
+			root.SetOut(out)
+			root.SetErr(new(bytes.Buffer))
+			root.SetIn(strings.NewReader(tt.url + "\n"))
+			root.SetArgs([]string{"auth", "login"})
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !strings.Contains(err.Error(), "Nothing was saved.") {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+			if strings.Contains(out.String(), "Logged in") {
+				t.Errorf("reported a login that failed: %q", out.String())
+			}
+
+			s, _ := config.LoadSettings()
+			c, _ := config.LoadCredentials()
+			if s.ActiveServer != "http://working" || len(s.Servers) != 1 {
+				t.Errorf("settings changed: %+v", s)
+			}
+			if len(c.APIKeys) != 1 || c.APIKeys["http://working"] != "working-key" {
+				t.Errorf("credentials changed: %v", c.APIKeys)
 			}
 		})
 	}

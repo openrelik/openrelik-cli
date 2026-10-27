@@ -47,6 +47,7 @@ func newFileCmd() *cobra.Command {
 	cmd.AddCommand(newFileInfoCmd())
 	cmd.AddCommand(newFileCatCmd())
 	cmd.AddCommand(removedFileCmds()...)
+	cmd.AddCommand(newFileShareCmds()...)
 	return cmd
 }
 

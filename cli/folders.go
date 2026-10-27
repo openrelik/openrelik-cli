@@ -24,13 +24,16 @@ func newFolderCmd() *cobra.Command {
 		Use:     "folder",
 		Aliases: []string{"folders"},
 		Short:   "Manage folders",
-		Long:    `Create, list, search, and show trees of folders in OpenRelik.`,
+		Long:    `Create, list, search, share, and show trees of folders in OpenRelik.`,
 	}
 
 	cmd.AddCommand(newListFoldersCmd())
 	cmd.AddCommand(newCreateFolderCmd())
 	cmd.AddCommand(newSearchFoldersCmd())
 	cmd.AddCommand(newTreeFoldersCmd())
+	cmd.AddCommand(newShareFolderCmd())
+	cmd.AddCommand(newUnshareFolderCmd())
+	cmd.AddCommand(newFolderAccessCmd())
 	cmd.AddCommand(removedFolderCmds()...)
 	return cmd
 }
@@ -40,6 +43,7 @@ const folderPageSize = 100
 
 func newListFoldersCmd() *cobra.Command {
 	var opts listOptions
+	var shared bool
 
 	cmd := &cobra.Command{
 		Use:     "list [FOLDER]",
@@ -47,8 +51,10 @@ func newListFoldersCmd() *cobra.Command {
 		Short:   "List folder contents",
 		Long: `List folder contents in OpenRelik.
 
-Without FOLDER, lists all root folders. With FOLDER, lists the
-subfolders and files in that folder.
+Without FOLDER, lists all root folders: your own and those other users
+shared with you. With --shared, lists only the folders shared with you,
+with their owners. With FOLDER, lists the subfolders and files in that
+folder.
 
 FOLDER is either a folder ID or a path of folder names starting at the
 root folders, such as 'Case A/evidence/'. An argument made only of
@@ -68,6 +74,9 @@ and -r to reverse the sort order. Use --limit N to show only the N most
 recently updated entries, in the selected sort order.`,
 		Example: `  # List all root folders, most recently updated last
   openrelik folder list
+
+  # List the folders other users shared with you
+  openrelik folder list --shared
 
   # List subfolders and files in folder 42
   openrelik folder list 42
@@ -91,6 +100,9 @@ recently updated entries, in the selected sort order.`,
 			if err := opts.validate(); err != nil {
 				return err
 			}
+			if shared && len(args) > 0 {
+				return usageErrorf("--shared lists root folders, so it can't be used with FOLDER")
+			}
 
 			client, err := newClient()
 			if err != nil {
@@ -108,10 +120,13 @@ recently updated entries, in the selected sort order.`,
 			var folders []openrelik.Folder
 			var files []openrelik.FolderFile
 			noun := "folders"
-			if fID != 0 {
+			switch {
+			case fID != 0:
 				folders, files, err = fetchFolderContents(cmd.Context(), client, fID)
 				noun = "items"
-			} else {
+			case shared:
+				folders, _, err = client.Folders().ListSharedFolders(cmd.Context())
+			default:
 				folders, err = util.ListAllRootFolders(cmd.Context(), client)
 			}
 
@@ -130,7 +145,11 @@ recently updated entries, in the selected sort order.`,
 			total := len(entries)
 			entries = limitAndSortEntries(entries, opts.limit, opts.sortBy, opts.reverse)
 
-			if err := formatAndPrint(cmd, &FolderContentsView{Entries: entries}); err != nil {
+			var view any = &FolderContentsView{Entries: entries}
+			if shared {
+				view = &SharedFoldersView{FolderContentsView{Entries: entries}}
+			}
+			if err := formatAndPrint(cmd, view); err != nil {
 				return err
 			}
 			printTruncationHint(cmd, len(entries), total, noun, "Omit --limit to see all.")
@@ -139,6 +158,7 @@ recently updated entries, in the selected sort order.`,
 	}
 
 	opts.addFlags(cmd, 0)
+	cmd.Flags().BoolVar(&shared, "shared", false, "List only the root folders other users shared with you")
 	return cmd
 }
 

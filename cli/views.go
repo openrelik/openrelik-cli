@@ -401,6 +401,188 @@ func (v *FolderContentsView) contents() folderContents {
 	return c
 }
 
+// SharedFoldersView renders the folders others shared with the user, for
+// 'folder list --shared'. It is a folder listing with the owner of each
+// folder, and the same JSON shape.
+type SharedFoldersView struct{ FolderContentsView }
+
+func (v *SharedFoldersView) RenderHuman(w io.Writer) error {
+	if len(v.Entries) == 0 {
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tDISPLAY NAME\tOWNER\tUPDATED")
+	for _, e := range v.Entries {
+		f := e.folder
+		fmt.Fprintf(tw, "%d\t%s/\t%s\t%s\n", f.ID, f.DisplayName, f.User.Username, util.FormatTime(f.UpdatedAt))
+	}
+	return tw.Flush()
+}
+
+// ShareResultView renders what 'folder share' or 'folder unshare' did for
+// each user and group. Failures aren't listed in human output, since the
+// error lists them.
+type ShareResultView struct {
+	Folder  *shareFolder
+	Verb    string // "share" or "unshare"
+	Results []shareResult
+}
+
+func (v *ShareResultView) RenderHuman(w io.Writer) error {
+	var shown []shareResult
+	for _, r := range v.Results {
+		if r.Status != "failed" && r.Status != "not_shared" {
+			shown = append(shown, r)
+		}
+	}
+	if len(shown) == 0 {
+		return nil
+	}
+	fmt.Fprintf(w, "Folder %d %q %sd:\n", v.Folder.ID, v.Folder.DisplayName, v.Verb)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	for _, r := range shown {
+		previous := make([]string, len(r.PreviousRoles))
+		for i, p := range r.PreviousRoles {
+			previous[i] = roleName(p)
+		}
+		var what string
+		switch r.Status {
+		case "removed":
+			what = "removed " + strings.Join(previous, ", ")
+		case "changed":
+			what = roleName(r.Role) + " (was " + strings.Join(previous, ", ") + ")"
+		case "unchanged":
+			what = roleName(r.Role) + " (unchanged)"
+		default:
+			what = roleName(r.Role)
+		}
+		fmt.Fprintf(tw, "  %s\t%s\t%s\n", r.Type, r.Name, what)
+	}
+	return tw.Flush()
+}
+
+func (v *ShareResultView) RenderVerbose(w io.Writer) error { return v.RenderHuman(w) }
+
+// shareFolderJSON identifies the folder in sharing output.
+type shareFolderJSON struct {
+	ID          int    `json:"id"`
+	DisplayName string `json:"display_name"`
+	Path        string `json:"path"`
+}
+
+func (f *shareFolder) json() shareFolderJSON {
+	return shareFolderJSON{ID: f.ID, DisplayName: f.DisplayName, Path: f.path}
+}
+
+func (v *ShareResultView) UnwrapJSON() any {
+	return struct {
+		Folder  shareFolderJSON `json:"folder"`
+		Results []shareResult   `json:"results"`
+	}{v.Folder.json(), v.Results}
+}
+
+// FolderAccessView renders your role on a folder and the roles on it and
+// its parents, for 'folder access'.
+type FolderAccessView struct {
+	Folder *shareFolder
+	MyRole *openrelik.MyRole
+	Grants []grant
+}
+
+// from says where a role comes from: the folder itself or a parent.
+func (v *FolderAccessView) from(g grant) string {
+	if g.folder.ID == v.Folder.ID {
+		return "this folder"
+	}
+	return folderPath(g.folder)
+}
+
+// myRoleSource says how you got your role, if not directly on the folder:
+// " (from /Case A/)", " (through group ir-team)" or both.
+func (v *FolderAccessView) myRoleSource() string {
+	var parts []string
+	if id := v.MyRole.FolderID; id != nil && *id != v.Folder.ID {
+		for f := v.Folder.Parent; f != nil; f = f.Parent {
+			if f.ID == *id {
+				parts = append(parts, "from "+folderPath(f))
+			}
+		}
+	}
+	if id := v.MyRole.GroupID; id != nil {
+		name := fmt.Sprintf("group %d", *id)
+		for _, g := range v.Grants {
+			if g.kind == "group" && g.id == *id {
+				name = "group " + g.name
+			}
+		}
+		parts = append(parts, "through "+name)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
+func (v *FolderAccessView) RenderHuman(w io.Writer) error { return v.render(w, false) }
+
+// RenderVerbose adds the role IDs.
+func (v *FolderAccessView) RenderVerbose(w io.Writer) error { return v.render(w, true) }
+
+func (v *FolderAccessView) render(w io.Writer, verbose bool) error {
+	fmt.Fprintf(w, "Folder %d %q (%s)\n", v.Folder.ID, v.Folder.DisplayName, v.Folder.path)
+	fmt.Fprintf(w, "Your role: %s%s\n\n", roleName(v.MyRole.Role), v.myRoleSource())
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if verbose {
+		fmt.Fprintln(tw, "TYPE\tNAME\tROLE\tFROM\tROLE ID")
+	} else {
+		fmt.Fprintln(tw, "TYPE\tNAME\tROLE\tFROM")
+	}
+	for _, g := range v.Grants {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s", g.kind, g.name, g.role, v.from(g))
+		if verbose {
+			fmt.Fprintf(tw, "\t%d", g.roleID)
+		}
+		fmt.Fprintln(tw)
+	}
+	return tw.Flush()
+}
+
+// accessJSON is a role in 'folder access' JSON output.
+type accessJSON struct {
+	RoleID      int    `json:"role_id"`
+	Role        string `json:"role"`
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+	// InheritedFrom is the parent folder the role is set on; null for
+	// roles on the folder itself.
+	InheritedFrom *shareFolderJSON `json:"inherited_from"`
+}
+
+func (v *FolderAccessView) UnwrapJSON() any {
+	users, groups := []accessJSON{}, []accessJSON{}
+	for _, g := range v.Grants {
+		a := accessJSON{RoleID: g.roleID, Role: roleJSON(g.role), ID: g.id, Name: g.name, DisplayName: g.displayName}
+		if g.folder.ID != v.Folder.ID {
+			a.InheritedFrom = &shareFolderJSON{ID: g.folder.ID, DisplayName: g.folder.DisplayName, Path: folderPath(g.folder)}
+		}
+		if g.kind == "user" {
+			users = append(users, a)
+		} else {
+			groups = append(groups, a)
+		}
+	}
+	return struct {
+		Folder shareFolderJSON `json:"folder"`
+		MyRole string          `json:"my_role"`
+		// MyRoleFolderID and MyRoleGroupID say where your role comes from.
+		MyRoleFolderID *int         `json:"my_role_folder_id"`
+		MyRoleGroupID  *int         `json:"my_role_group_id"`
+		Users          []accessJSON `json:"users"`
+		Groups         []accessJSON `json:"groups"`
+	}{v.Folder.json(), roleJSON(v.MyRole.Role), v.MyRole.FolderID, v.MyRole.GroupID, users, groups}
+}
+
 // FolderTreeView renders a folder tree like 'tree', with each entry's ID in
 // brackets and a summary count at the end.
 type FolderTreeView struct {

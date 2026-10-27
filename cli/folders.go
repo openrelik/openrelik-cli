@@ -23,12 +23,13 @@ func newFolderCmd() *cobra.Command {
 		Use:     "folder",
 		Aliases: []string{"folders"},
 		Short:   "Manage folders",
-		Long:    `Create, list, and search folders in OpenRelik.`,
+		Long:    `Create, list, search, and show trees of folders in OpenRelik.`,
 	}
 
 	cmd.AddCommand(newListFoldersCmd())
 	cmd.AddCommand(newCreateFolderCmd())
 	cmd.AddCommand(newSearchFoldersCmd())
+	cmd.AddCommand(newTreeFoldersCmd())
 	return cmd
 }
 

@@ -182,6 +182,88 @@ func (v *FolderContentsView) contents() folderContents {
 	return c
 }
 
+// FolderTreeView renders a folder tree like 'tree', with each entry's ID in
+// brackets and a summary count at the end.
+type FolderTreeView struct {
+	Root        *treeNode
+	FoldersOnly bool
+}
+
+func (v *FolderTreeView) RenderHuman(w io.Writer) error {
+	if f := v.Root.folder; f != nil {
+		fmt.Fprintf(w, "[%d]  %s/\n", f.ID, f.DisplayName)
+	} else {
+		fmt.Fprintln(w, ".")
+	}
+	var folders, files int
+	var walk func(n *treeNode, prefix string)
+	walk = func(n *treeNode, prefix string) {
+		for i, e := range n.entries {
+			connector, indent := "├── ", "│   "
+			if i == len(n.entries)-1 {
+				connector, indent = "└── ", "    "
+			}
+			if e.folder != nil {
+				folders++
+				fmt.Fprintf(w, "%s%s[%d]  %s/\n", prefix, connector, e.folder.ID, e.folder.DisplayName)
+				walk(n.children[e.folder.ID], prefix+indent)
+				continue
+			}
+			files++
+			fmt.Fprintf(w, "%s%s[%d]  %s\n", prefix, connector, e.file.ID, e.file.DisplayName)
+		}
+	}
+	walk(v.Root, "")
+
+	summary := plural(folders, "folder", "folders")
+	if !v.FoldersOnly {
+		summary += ", " + plural(files, "file", "files")
+	}
+	fmt.Fprintf(w, "\n%s\n", summary)
+	return nil
+}
+
+// RenderVerbose uses the tree drawing; a flat field listing would lose the
+// structure.
+func (v *FolderTreeView) RenderVerbose(w io.Writer) error { return v.RenderHuman(w) }
+
+// folderTreeJSON is a folder with its contents nested in the same shape as
+// 'folder list'. Folders and files are null when they were not fetched.
+type folderTreeJSON struct {
+	*openrelik.Folder
+	Folders []folderTreeJSON       `json:"folders"`
+	Files   []openrelik.FolderFile `json:"files"`
+}
+
+func (v *FolderTreeView) UnwrapJSON() any { return v.treeJSON(v.Root) }
+
+func (v *FolderTreeView) treeJSON(n *treeNode) folderTreeJSON {
+	out := folderTreeJSON{Folder: n.folder}
+	if n.entries == nil {
+		return out
+	}
+	out.Folders = []folderTreeJSON{}
+	if !v.FoldersOnly {
+		out.Files = []openrelik.FolderFile{}
+	}
+	for _, e := range n.entries {
+		if e.folder != nil {
+			out.Folders = append(out.Folders, v.treeJSON(n.children[e.folder.ID]))
+		} else {
+			out.Files = append(out.Files, *e.file)
+		}
+	}
+	return out
+}
+
+// plural formats a count with the singular or plural noun.
+func plural(n int, singular, pluralNoun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, singular)
+	}
+	return fmt.Sprintf("%d %s", n, pluralNoun)
+}
+
 // --- Users ---
 
 // UserMeView renders the current user's profile fields.

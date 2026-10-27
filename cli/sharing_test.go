@@ -145,6 +145,7 @@ func (s *shareServer) share(w http.ResponseWriter, r *http.Request, folder strin
 	id, _ := strconv.Atoi(folder)
 	add := func(kind string, names []string, role string, known map[string]int) bool {
 		for _, n := range names {
+			n = strings.ToLower(n)
 			if _, ok := known[n]; !ok {
 				w.WriteHeader(http.StatusNotFound)
 				fmt.Fprintf(w, `{"detail": "%s %q not found."}`, kind, n)
@@ -374,6 +375,7 @@ func TestFolderShareLastOwner(t *testing.T) {
 	s := newShareServer(t)
 	for _, args := range [][]string{
 		{"folder", "unshare", "42", "--user", "me", "--force"},
+		{"folder", "unshare", "42", "--user", "ME", "--force"},
 		{"folder", "share", "42", "--user", "me", "--role", "editor", "--force"},
 	} {
 		_, _, err := runShare(t, s, "", args...)
@@ -510,6 +512,8 @@ func TestFileShareHint(t *testing.T) {
 	}{
 		{[]string{"folder", "share", "Case A/evidence/notes.txt", "--user", "alice", "--role", "viewer"},
 			"openrelik folder share 'Case A/evidence/' --user alice --role viewer"},
+		{[]string{"file", "share", "9", "--group", "ir team", "--role", "editor"},
+			"file 9 is in folder 43."},
 		{[]string{"file", "share", "9", "--group", "ir team", "--role", "editor"},
 			"openrelik folder share 43 --group 'ir team' --role editor"},
 		{[]string{"file", "unshare", "Case A/evidence/notes.txt", "--user", "alice"},

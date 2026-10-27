@@ -95,7 +95,17 @@ type principal struct {
 
 func (p principal) String() string { return p.kind + " " + p.name }
 
-func (p principal) matches(g grant) bool { return g.kind == p.kind && g.name == p.name }
+func (p principal) matches(g grant) bool {
+	return g.kind == p.kind && strings.EqualFold(g.name, p.name)
+}
+
+func (p principal) matchesPrincipal(other principal) bool {
+	return p.kind == other.kind && strings.EqualFold(p.name, other.name)
+}
+
+func containsPrincipal(list []principal, target principal) bool {
+	return slices.ContainsFunc(list, target.matchesPrincipal)
+}
 
 // principalsFromFlags returns the users and groups from --user and --group,
 // without duplicates.
@@ -108,7 +118,7 @@ func principalsFromFlags(users, groups []string) ([]principal, error) {
 				return usageErrorf("--%s must not be empty", kind)
 			}
 			p := principal{kind, n}
-			if !slices.Contains(out, p) {
+			if !containsPrincipal(out, p) {
 				out = append(out, p)
 			}
 		}
@@ -182,20 +192,20 @@ func loadShareFolder(cmd *cobra.Command, client *openrelik.Client, arg, hint str
 // fileShareError explains that a file can't be shared on its own, with the
 // command that shares its folder instead.
 func fileShareError(file, verb, folder, hint string) error {
-	file = shellQuote(file)
+	what := shellQuote(file) + " is a file."
 	if folderIDPattern.MatchString(file) {
-		file = "file " + file
+		what = "file " + file + " is in folder " + folder + "."
 	}
 	switch verb {
 	case "access":
-		return usageErrorf("%s is a file. Access to a file comes from the folder it is in:\n\n  openrelik folder access %s",
-			file, shellQuote(folder))
+		return usageErrorf("%s Access to a file comes from the folder it is in:\n\n  openrelik folder access %s",
+			what, shellQuote(folder))
 	case "unshare":
-		return usageErrorf("%s is a file. Files can't be unshared on their own; they are shared with the\nfolder they are in. To unshare the folder (and everything in it):\n\n  openrelik folder unshare %s%s",
-			file, shellQuote(folder), hint)
+		return usageErrorf("%s Files can't be unshared on their own; they are shared with the\nfolder they are in. To unshare the folder (and everything in it):\n\n  openrelik folder unshare %s%s",
+			what, shellQuote(folder), hint)
 	default:
-		return usageErrorf("%s is a file. Files can't be shared on their own; they are shared with the\nfolder they are in. To share the folder (and everything in it):\n\n  openrelik folder share %s%s",
-			file, shellQuote(folder), hint)
+		return usageErrorf("%s Files can't be shared on their own; they are shared with the\nfolder they are in. To share the folder (and everything in it):\n\n  openrelik folder share %s%s",
+			what, shellQuote(folder), hint)
 	}
 }
 
@@ -266,7 +276,7 @@ func (c *shareChecks) check(after func(p principal) string) error {
 			continue
 		}
 		owners++
-		if g.folder.ID != c.folder.ID || !slices.Contains(c.changes, principal{g.kind, g.name}) {
+		if g.folder.ID != c.folder.ID || !containsPrincipal(c.changes, principal{g.kind, g.name}) {
 			ownersAfter++
 		}
 	}
@@ -290,7 +300,7 @@ func (c *shareChecks) check(after func(p principal) string) error {
 			break
 		}
 	}
-	if !slices.Contains(c.changes, mine) {
+	if mine.name == "" || !containsPrincipal(c.changes, mine) {
 		return nil
 	}
 	current := grantsOf(folderGrants(c.folder.Folder), mine)
@@ -490,10 +500,6 @@ func shareWith(cmd *cobra.Command, client *openrelik.Client, folder *shareFolder
 		}
 		old = append(old, g)
 	}
-	for _, g := range old {
-		r.PreviousRoles = append(r.PreviousRoles, roleJSON(g.role))
-	}
-
 	if !hasRole {
 		req := &openrelik.FolderShareRequest{}
 		if p.kind == "user" {
@@ -521,6 +527,7 @@ func shareWith(cmd *cobra.Command, client *openrelik.Client, folder *shareFolder
 				err, p.name, strings.Join(left, ", "), folder.ID, p.kind, shellQuote(p.name)), err})
 			return r
 		}
+		r.PreviousRoles = append(r.PreviousRoles, roleJSON(g.role))
 	}
 
 	switch {
@@ -729,7 +736,7 @@ func multipleRoles(grants []grant) []roleCount {
 	var counts []roleCount
 	for _, g := range grants {
 		p := principal{g.kind, g.name}
-		i := slices.IndexFunc(counts, func(c roleCount) bool { return c.p == p })
+		i := slices.IndexFunc(counts, func(c roleCount) bool { return c.p.matchesPrincipal(p) })
 		if i < 0 {
 			counts = append(counts, roleCount{p, 1})
 		} else {

@@ -133,7 +133,7 @@ hasn't hashed (yet) are reported as not verified.`,
 				}
 				if !force {
 					var unverified []skippedFile
-					view.Skipped, unverified, err = findDuplicates(cmd.Context(), client, view.FolderID, sources, isDir, sizes)
+					view.Skipped, unverified, err = util.FindExisting(cmd.Context(), client, view.FolderID, sources, isDir, sizes)
 					if err != nil {
 						return err
 					}
@@ -225,67 +225,7 @@ func localDirName(path string) string {
 
 // skippedFile is a file 'upload' left out because the destination folder
 // already holds it.
-type skippedFile struct {
-	Path     string `json:"path"`
-	FileID   int    `json:"file_id"`
-	FolderID int    `json:"folder_id"`
-	Reason   string `json:"reason"`
-}
-
-// findDuplicates returns the files among sources that folderID already
-// holds. Only files with the same name and size are compared, so other
-// files cost nothing beyond one listing of the folder. Files with the same
-// SHA256 are returned as duplicates. Files the server has no hash for are
-// returned as unverified instead: hashing is skipped for very large files
-// and runs in the background, so the same name and size is all there is to
-// go on, and memory images of the same machine often share both.
-func findDuplicates(ctx context.Context, client *openrelik.Client, folderID int, sources []string, isDir []bool, sizes []int64) (duplicates, unverified []skippedFile, err error) {
-	if !slices.Contains(isDir, false) {
-		return nil, nil, nil // only directories, which go into new subfolders
-	}
-	existing, _, err := client.Folders().ListFiles(ctx, folderID)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	for i, p := range sources {
-		if isDir[i] {
-			continue
-		}
-		var localHash string
-		var unhashed *skippedFile
-		for _, f := range existing {
-			if f.DisplayName != filepath.Base(p) || f.Filesize != sizes[i] {
-				continue
-			}
-			info, _, err := client.Files().Info(ctx, f.ID)
-			if err != nil {
-				return nil, nil, err
-			}
-			if info.HashSHA256 == "" {
-				if unhashed == nil {
-					unhashed = &skippedFile{Path: p, FileID: f.ID, FolderID: folderID,
-						Reason: "same name and size; the server has no hash to compare"}
-				}
-				continue
-			}
-			if localHash == "" {
-				if localHash, err = fileSHA256(p); err != nil {
-					return nil, nil, err
-				}
-			}
-			if strings.EqualFold(localHash, info.HashSHA256) {
-				duplicates = append(duplicates, skippedFile{Path: p, FileID: f.ID, FolderID: folderID, Reason: "same name and SHA256"})
-				unhashed = nil
-				break
-			}
-		}
-		if unhashed != nil {
-			unverified = append(unverified, *unhashed)
-		}
-	}
-	return duplicates, unverified, nil
-}
+type skippedFile = util.ExistingFile
 
 // askUnverified asks whether to upload each file that may already be in
 // the destination folder, and returns the ones to skip. Without a terminal
@@ -319,20 +259,6 @@ func askUnverified(cmd *cobra.Command, unverified []skippedFile) ([]skippedFile,
 		}
 	}
 	return skip, nil
-}
-
-// fileSHA256 returns the hex SHA256 of the file at path.
-func fileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // uploadedFile is a file uploaded by 'upload' and the folder it went to.

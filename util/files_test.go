@@ -16,12 +16,15 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -48,7 +51,7 @@ func TestResolveInputs(t *testing.T) {
 		client, _ := openrelik.NewClient(server.URL, "test-key")
 		ctx := context.Background()
 
-		ids, total, err := ResolveInputs(ctx, client, []string{"123", "456"}, false, 0, "")
+		ids, total, err := ResolveInputs(ctx, client, noServerPaths, []string{"123", "456"}, false, 0, "")
 		if err != nil {
 			t.Fatalf("ResolveInputs failed: %v", err)
 		}
@@ -67,6 +70,10 @@ func TestResolveInputs(t *testing.T) {
 		client, _ := openrelik.NewClient(server.URL, "test-key")
 		ctx := context.Background()
 
+		mux.HandleFunc("/api/v1/folders/123/files/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[]`)
+		})
 		mux.HandleFunc("/api/v1/files/upload", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost {
 				w.Header().Set("Content-Type", "application/json")
@@ -74,7 +81,7 @@ func TestResolveInputs(t *testing.T) {
 			}
 		})
 
-		ids, total, err := ResolveInputs(ctx, client, []string{tmpFile}, false, 123, "")
+		ids, total, err := ResolveInputs(ctx, client, noServerPaths, []string{tmpFile}, false, 123, "")
 		if err != nil {
 			t.Fatalf("ResolveInputs failed: %v", err)
 		}
@@ -101,6 +108,10 @@ func TestResolveInputs(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"folders": [{"id": 2, "display_name": "Custom Folder", "user": {"id": 7}}]}`)
 		})
+		mux.HandleFunc("/api/v1/folders/2/files/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[]`)
+		})
 		mux.HandleFunc("/api/v1/files/upload", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost {
 				w.Header().Set("Content-Type", "application/json")
@@ -108,7 +119,7 @@ func TestResolveInputs(t *testing.T) {
 			}
 		})
 
-		ids, total, err := ResolveInputs(ctx, client, []string{tmpFile}, false, 0, "Custom Folder")
+		ids, total, err := ResolveInputs(ctx, client, noServerPaths, []string{tmpFile}, false, 0, "Custom Folder")
 		if err != nil {
 			t.Fatalf("ResolveInputs failed: %v", err)
 		}
@@ -135,6 +146,10 @@ func TestResolveInputs(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"folders": [{"id": 3, "display_name": "CLI Uploads (testuser)"}]}`)
 		})
+		mux.HandleFunc("/api/v1/folders/3/files/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[]`)
+		})
 		mux.HandleFunc("/api/v1/files/upload", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost {
 				w.Header().Set("Content-Type", "application/json")
@@ -142,7 +157,7 @@ func TestResolveInputs(t *testing.T) {
 			}
 		})
 
-		ids, total, err := ResolveInputs(ctx, client, []string{tmpFile}, false, 0, "")
+		ids, total, err := ResolveInputs(ctx, client, noServerPaths, []string{tmpFile}, false, 0, "")
 		if err != nil {
 			t.Fatalf("ResolveInputs failed: %v", err)
 		}
@@ -161,7 +176,7 @@ func TestResolveInputs(t *testing.T) {
 		client, _ := openrelik.NewClient(server.URL, "test-key")
 		ctx := context.Background()
 
-		_, _, err := ResolveInputs(ctx, client, []string{"not-a-file-and-not-an-id"}, false, 0, "")
+		_, _, err := ResolveInputs(ctx, client, noServerPaths, []string{"not-a-file-and-not-an-id"}, false, 0, "")
 		if err == nil {
 			t.Fatal("Expected error for invalid input, got nil")
 		}
@@ -452,31 +467,168 @@ func TestClassifyInput(t *testing.T) {
 	os.Mkdir("logs", 0o755)
 
 	tests := []struct {
-		arg      string
-		wantID   int
-		wantPath string
-		wantErr  string
+		arg     string
+		want    input
+		wantErr string
 	}{
-		{arg: "123", wantID: 123},
-		{arg: "evidence.bin", wantPath: "evidence.bin"},
-		{arg: "./4121", wantPath: "./4121"},
+		{arg: "123", want: input{kind: inputID, id: 123}},
+		{arg: "evidence.bin", want: input{kind: inputLocal, path: "evidence.bin"}},
+		{arg: "./4121", want: input{kind: inputLocal, path: "./4121"}},
 		{arg: "4121", wantErr: "\"4121\" is both a file ID and a local file\nUse ./4121 to upload the local file, or run from a directory without it to use file 4121."},
-		{arg: "2024", wantID: 2024}, // a directory can't be an input, so this is the ID
+		{arg: "2024", want: input{kind: inputID, id: 2024}}, // a directory can't be an input, so this is the ID
 		{arg: "0", wantErr: "invalid file ID: 0"},
-		{arg: "missing.bin", wantErr: `"missing.bin" is neither a file ID nor a local file`},
+		{arg: "Case A/disk.E01", want: input{kind: inputServer, path: "Case A/disk.E01"}},
+		{arg: "Case A/", wantErr: `"Case A/" is neither a file ID, a local file nor a server path (FOLDER/NAME)`},
+		{arg: "missing.bin", wantErr: `"missing.bin" is neither a file ID, a local file nor a server path (FOLDER/NAME)`},
 		{arg: "logs", wantErr: `"logs" is a directory`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.arg, func(t *testing.T) {
-			id, path, err := classifyInput(tt.arg)
+			got, err := classifyInput(tt.arg)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
 				}
 				return
 			}
-			if err != nil || id != tt.wantID || path != tt.wantPath {
-				t.Errorf("classifyInput(%q) = %d, %q, %v; want %d, %q", tt.arg, id, path, err, tt.wantID, tt.wantPath)
+			if err != nil || got != tt.want {
+				t.Errorf("classifyInput(%q) = %+v, %v; want %+v", tt.arg, got, err, tt.want)
+			}
+		})
+	}
+}
+
+// noServerPaths is a ServerPathResolver for a server without files.
+func noServerPaths(ctx context.Context, path string) (int, error) {
+	return 0, &NotOnServerError{Err: fmt.Errorf("no file at %s", path)}
+}
+
+func TestResolveInputsServerPaths(t *testing.T) {
+	t.Chdir(t.TempDir())
+	os.Mkdir("Case A", 0o755)
+	os.WriteFile("Case A/local.bin", []byte("x"), 0o644)
+	os.WriteFile("Case A/both.bin", []byte("x"), 0o644)
+	resolve := func(ctx context.Context, path string) (int, error) {
+		switch strings.TrimPrefix(path, "/") {
+		case "Case A/disk.E01":
+			return 812, nil
+		case "Case A/both.bin":
+			return 813, nil
+		case "Case A/down.bin":
+			return 0, errors.New("could not reach the server")
+		}
+		return 0, &NotOnServerError{Err: errors.New(`no file named "x"`)}
+	}
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		args    []string
+		want    []int
+		wantErr string
+	}{
+		{name: "order is kept", args: []string{"5", "Case A/disk.E01", "/Case A/disk.E01", "3"}, want: []int{5, 812, 812, 3}},
+		{name: "not on the server", args: []string{"Case A/typo.E01"}, wantErr: `"Case A/typo.E01" is neither a local file nor a file on the server: no file named "x"`},
+		{name: "server error", args: []string{"Case A/down.bin"}, wantErr: "could not reach the server"},
+		{name: "both local and on the server", args: []string{"Case A/both.bin"}, wantErr: "\"Case A/both.bin\" is both a local file and file 813 on the server\nUse ./Case A/both.bin to upload the local file, or 813 to use the server file."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// No server: these inputs must not need one.
+			got, _, err := ResolveInputs(ctx, nil, resolve, tt.args, false, 0, "")
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, tt.want) {
+				t.Errorf("ResolveInputs(%q) = %v, %v; want %v", tt.args, got, err, tt.want)
+			}
+		})
+	}
+
+	// ./PATH is always local, so the server isn't asked about it.
+	t.Run("./ skips the server", func(t *testing.T) {
+		asked := false
+		resolve := func(ctx context.Context, path string) (int, error) {
+			asked = true
+			return 1, nil
+		}
+		// The upload fails without a server; only the check matters here.
+		ResolveInputs(ctx, uploadServer(t, `[]`, nil), resolve, []string{"./Case A/local.bin"}, false, 40, "")
+		if asked {
+			t.Error("the server was asked about ./Case A/local.bin")
+		}
+	})
+}
+
+// uploadServer is a mock API whose folder 40 holds the given files. Each
+// file's SHA256 is in hashes. Uploads get ID 900 and are counted in
+// *uploads, if uploads isn't nil.
+func uploadServer(t *testing.T, files string, hashes map[int]string, uploads ...*int) *openrelik.Client {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/folders/40/files/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, files)
+	})
+	mux.HandleFunc("/api/v1/files/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id, _ := strconv.Atoi(r.PathValue("id"))
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id": %d, "hash_sha256": %q}`, id, hashes[id])
+	})
+	mux.HandleFunc("/api/v1/files/upload", func(w http.ResponseWriter, r *http.Request) {
+		if len(uploads) > 0 {
+			*uploads[0]++
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id": 900, "display_name": "disk.E01"}`)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client, _ := openrelik.NewClient(server.URL, "test-key")
+	return client
+}
+
+func TestResolveInputsReusesUploads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "disk.E01")
+	os.WriteFile(path, []byte("hello"), 0o644)
+	const helloSHA256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+	tests := []struct {
+		name        string
+		files       string
+		hashes      map[int]string
+		wantID      int
+		wantUploads int
+	}{
+		{name: "same name and SHA256", files: `[{"id": 812, "display_name": "disk.E01", "filesize": 5}]`,
+			hashes: map[int]string{812: helloSHA256}, wantID: 812},
+		{name: "different SHA256", files: `[{"id": 812, "display_name": "disk.E01", "filesize": 5}]`,
+			hashes: map[int]string{812: strings.Repeat("0", 64)}, wantID: 900, wantUploads: 1},
+		{name: "no hash on the server", files: `[{"id": 812, "display_name": "disk.E01", "filesize": 5}]`,
+			wantID: 900, wantUploads: 1},
+		{name: "different size", files: `[{"id": 812, "display_name": "disk.E01", "filesize": 6}]`,
+			hashes: map[int]string{812: helloSHA256}, wantID: 900, wantUploads: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uploads := 0
+			client := uploadServer(t, tt.files, tt.hashes, &uploads)
+			ids, total, err := ResolveInputs(context.Background(), client, noServerPaths, []string{path}, false, 40, "")
+			// The mock doesn't hash uploads, so only reused files verify.
+			if tt.wantUploads == 0 && err != nil {
+				t.Fatalf("ResolveInputs failed: %v", err)
+			}
+			if err == nil && (len(ids) != 1 || ids[0] != tt.wantID) {
+				t.Errorf("IDs = %v, want [%d]", ids, tt.wantID)
+			}
+			if tt.wantUploads == 0 && total != 0 {
+				t.Errorf("uploaded %d bytes, want 0", total)
+			}
+			if uploads != tt.wantUploads {
+				t.Errorf("uploads = %d, want %d", uploads, tt.wantUploads)
 			}
 		})
 	}

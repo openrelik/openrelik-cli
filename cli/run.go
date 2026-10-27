@@ -40,10 +40,18 @@ list of workers is cached for an hour, and updated when a workflow is
 started, when this help is shown, or when a worker isn't known. Use
 'openrelik worker list' to update it at any time.
 
-Inputs are either integer file IDs or local file paths (auto-uploaded):
+Inputs are file IDs, local files, or paths of files on the server:
 
-  openrelik run strings 123           # file ID
-  openrelik run strings report.pdf    # local file (uploaded first)
+  openrelik run strings 123                    # file ID
+  openrelik run strings report.pdf             # local file (uploaded first)
+  openrelik run strings "Case A/disk.E01"      # file on the server
+
+A local file is uploaded to the upload folder, unless the folder already
+holds a file with the same name and SHA256, which is then used instead.
+An input that isn't a local file and contains a '/' is a path on the
+server, as in 'file info'. If a relative path names both a local file and
+a file on the server, run fails rather than guess: write ./PATH for the
+local file, or use the file ID.
 
 Chain workers in sequence with --then (each worker receives the outputs
 of the previous one):
@@ -136,6 +144,19 @@ const helpRefreshTimeout = 5 * time.Second
 
 // checkRemovedRunFlags fails if a removed flag of 'run' is used, either
 // before the worker (parsed by 'run') or among the worker's own arguments.
+// serverPathResolver resolves the inputs of 'run' that are paths of files
+// on the server.
+func serverPathResolver(client *openrelik.Client) util.ServerPathResolver {
+	return func(ctx context.Context, path string) (int, error) {
+		id, err := resolveFile(ctx, client, path)
+		var notFound notFoundError
+		if errors.As(err, &notFound) {
+			return 0, &util.NotOnServerError{Err: err}
+		}
+		return id, err
+	}
+}
+
 func checkRemovedRunFlags(cmd *cobra.Command, args []string) error {
 	used := cmd.Flags().Changed("no-download")
 	for _, arg := range args {
@@ -297,13 +318,13 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 				}
 			}
 
-			fileIDs, totalUploaded, err := util.ResolveInputs(cmd.Context(), client, positionalArgs, showProgress, meta.UploadFolderID, meta.UploadFolderName)
+			fileIDs, totalUploaded, err := util.ResolveInputs(cmd.Context(), client, serverPathResolver(client), positionalArgs, showProgress, meta.UploadFolderID, meta.UploadFolderName)
 			if err != nil {
 				return err
 			}
 
 			if len(fileIDs) == 0 {
-				return fmt.Errorf("no inputs provided (IDs or file paths)")
+				return fmt.Errorf("no inputs provided (file IDs, local files or server paths)")
 			}
 
 			startTime := time.Now()

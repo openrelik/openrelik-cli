@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -35,133 +36,303 @@ import (
 // fileIDPattern matches inputs that are file IDs rather than local paths.
 var fileIDPattern = regexp.MustCompile(`^[0-9]+$`)
 
-// CheckInputs checks that every input to 'run' is either a file ID or a
-// local file, without uploading anything, so that mistakes are caught
-// before a workflow is created or previewed.
+// CheckInputs checks that every input to 'run' is a file ID, a local file
+// or has the form of a server path, without contacting the server or
+// uploading anything, so that mistakes are caught before a workflow is
+// created or previewed.
 func CheckInputs(args []string) error {
 	for _, arg := range args {
-		if _, _, err := classifyInput(arg); err != nil {
+		if _, err := classifyInput(arg); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// classifyInput returns the file ID for an input made only of digits, or the
-// path for a local file. A number that is also the name of a local file is
-// an error rather than a guess: picking either one could run the workflow
-// on the wrong evidence. Local paths can be written as ./NAME to make them
-// unambiguous.
-func classifyInput(arg string) (id int, path string, err error) {
+// inputKind is how an input to 'run' is read.
+type inputKind int
+
+const (
+	inputID     inputKind = iota // a file ID
+	inputLocal                   // a local file, to upload
+	inputServer                  // a path of a file on the server
+)
+
+// input is an input to 'run', classified by classifyInput.
+type input struct {
+	kind inputKind
+	id   int
+	path string
+}
+
+// classifyInput reads an input made only of digits as a file ID, an
+// existing local file as a local file, and any other input with a '/' as
+// the path of a file on the server. A number that is also the name of a
+// local file is an error rather than a guess: picking either one could run
+// the workflow on the wrong evidence. Local paths can be written as ./NAME
+// to make them unambiguous.
+func classifyInput(arg string) (input, error) {
 	info, statErr := os.Stat(arg)
 	if fileIDPattern.MatchString(arg) {
 		id, err := strconv.Atoi(arg)
 		if err != nil || id == 0 {
-			return 0, "", fmt.Errorf("invalid file ID: %s", arg)
+			return input{}, fmt.Errorf("invalid file ID: %s", arg)
 		}
 		if statErr == nil && !info.IsDir() {
-			return 0, "", fmt.Errorf("%q is both a file ID and a local file\nUse ./%s to upload the local file, or run from a directory without it to use file %d.", arg, arg, id)
+			return input{}, fmt.Errorf("%q is both a file ID and a local file\nUse ./%s to upload the local file, or run from a directory without it to use file %d.", arg, arg, id)
 		}
-		return id, "", nil
+		return input{kind: inputID, id: id}, nil
 	}
 	switch {
+	case os.IsNotExist(statErr) && strings.Contains(arg, "/") && !strings.HasSuffix(arg, "/"):
+		return input{kind: inputServer, path: arg}, nil
 	case os.IsNotExist(statErr):
-		return 0, "", fmt.Errorf("%q is neither a file ID nor a local file", arg)
+		return input{}, fmt.Errorf("%q is neither a file ID, a local file nor a server path (FOLDER/NAME)", arg)
 	case statErr != nil:
-		return 0, "", fmt.Errorf("failed to stat file %s: %w", arg, statErr)
+		return input{}, fmt.Errorf("failed to stat file %s: %w", arg, statErr)
 	case info.IsDir():
-		return 0, "", fmt.Errorf("%q is a directory; give files or file IDs (upload directories with 'openrelik upload')", arg)
+		return input{}, fmt.Errorf("%q is a directory; give files or file IDs (upload directories with 'openrelik upload')", arg)
 	}
-	return 0, arg, nil
+	return input{kind: inputLocal, path: arg}, nil
 }
 
-// ResolveInputs takes a slice of strings that can be either file IDs (integers)
-// or local file paths. It uploads local files to an OpenRelik folder.
-func ResolveInputs(ctx context.Context, client *openrelik.Client, args []string, showProgress bool, folderID int, folderName string) ([]int, int64, error) {
-	var fileIDs []int
-	var filesToUpload []string
+// mayBeServerPath reports whether a local path could also be read as the
+// path of a file on the server: a relative path with a folder in it, not
+// written as ./PATH or ../PATH.
+func mayBeServerPath(path string) bool {
+	return strings.Contains(path, "/") && !filepath.IsAbs(path) &&
+		!strings.HasPrefix(path, "./") && !strings.HasPrefix(path, "../")
+}
+
+// ServerPathResolver returns the ID of the file on the server at path. If
+// no file has that path, the error is a *NotOnServerError.
+type ServerPathResolver func(ctx context.Context, path string) (int, error)
+
+// NotOnServerError is returned by a ServerPathResolver when no file on the
+// server has the path. Err says why.
+type NotOnServerError struct {
+	Err error
+}
+
+func (e *NotOnServerError) Error() string { return e.Err.Error() }
+func (e *NotOnServerError) Unwrap() error { return e.Err }
+
+// ResolveInputs returns the file IDs of the inputs to 'run', in the order
+// given. Inputs are file IDs, paths of files on the server, resolved with
+// resolve, or local files. Local files are uploaded to an OpenRelik folder,
+// unless the folder already holds a file with the same name and SHA256.
+// It also returns the number of bytes uploaded.
+func ResolveInputs(ctx context.Context, client *openrelik.Client, resolve ServerPathResolver, args []string, showProgress bool, folderID int, folderName string) ([]int, int64, error) {
+	fileIDs := make([]int, len(args))
+	var toUpload []int // indexes into args
 	var totalUploaded int64
 
-	for _, arg := range args {
-		id, path, err := classifyInput(arg)
+	for i, arg := range args {
+		in, err := classifyInput(arg)
 		if err != nil {
 			return nil, 0, err
 		}
-		if path != "" {
-			filesToUpload = append(filesToUpload, path)
-		} else {
-			fileIDs = append(fileIDs, id)
+		switch in.kind {
+		case inputID:
+			fileIDs[i] = in.id
+		case inputServer:
+			id, err := resolve(ctx, in.path)
+			var notOnServer *NotOnServerError
+			if errors.As(err, &notOnServer) {
+				return nil, 0, fmt.Errorf("%q is neither a local file nor a file on the server: %w", arg, err)
+			}
+			if err != nil {
+				return nil, 0, err
+			}
+			fileIDs[i] = id
+		case inputLocal:
+			if mayBeServerPath(in.path) {
+				id, err := resolve(ctx, in.path)
+				var notOnServer *NotOnServerError
+				switch {
+				case err == nil:
+					return nil, 0, fmt.Errorf("%q is both a local file and file %d on the server\nUse ./%s to upload the local file, or %d to use the server file.", arg, id, arg, id)
+				case !errors.As(err, &notOnServer):
+					return nil, 0, fmt.Errorf("%q is a local file, but may also be on the server (use ./%s for the local file): %w", arg, arg, err)
+				}
+			}
+			toUpload = append(toUpload, i)
+		}
+	}
+	if len(toUpload) == 0 {
+		return fileIDs, 0, nil
+	}
+
+	var folder *openrelik.Folder
+	if folderID > 0 {
+		folder = &openrelik.Folder{ID: folderID}
+	} else {
+		if folderName == "" {
+			user, _, err := client.Users().GetMe(ctx)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to get current user: %w", err)
+			}
+			folderName = fmt.Sprintf("CLI Uploads (%s)", user.Username)
+		}
+		var err error
+		folder, err = GetOrCreateFolder(ctx, client, folderName)
+		if err != nil {
+			return nil, 0, err
 		}
 	}
 
-	if len(filesToUpload) > 0 {
-		var folder *openrelik.Folder
-		var err error
-
-		if folderID > 0 {
-			folder = &openrelik.Folder{ID: folderID}
-		} else {
-			if folderName == "" {
-				user, _, err := client.Users().GetMe(ctx)
-				if err != nil {
-					return nil, 0, fmt.Errorf("failed to get current user: %w", err)
-				}
-				folderName = fmt.Sprintf("CLI Uploads (%s)", user.Username)
-			}
-			folder, err = GetOrCreateFolder(ctx, client, folderName)
-			if err != nil {
-				return nil, 0, err
-			}
+	// Reuse the files the folder already holds.
+	paths := make([]string, len(toUpload))
+	sizes := make([]int64, len(toUpload))
+	for j, i := range toUpload {
+		info, err := os.Stat(args[i])
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to stat file %s: %w", args[i], err)
 		}
+		paths[j], sizes[j] = args[i], info.Size()
+	}
+	existing, _, err := FindExisting(ctx, client, folder.ID, paths, make([]bool, len(paths)), sizes)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to check folder %d for files already uploaded: %w", folder.ID, err)
+	}
+	reused := map[string]int{}
+	for _, e := range existing {
+		reused[e.Path] = e.FileID
+		if showProgress {
+			fmt.Fprintf(os.Stderr, "Using file %d already in folder %d (%s): %s\n", e.FileID, e.FolderID, e.Reason, filepath.Base(e.Path))
+		}
+	}
 
-		for _, path := range filesToUpload {
-			err := func() error {
-				f, err := os.Open(path)
-				if err != nil {
-					return fmt.Errorf("failed to open file %s: %w", path, err)
-				}
-				defer f.Close()
-
-				stat, err := f.Stat()
-				if err != nil {
-					return fmt.Errorf("failed to stat file %s: %w", path, err)
-				}
-				filename := filepath.Base(path)
-
-				var trackerWriter io.Writer = os.Stderr
-				if !showProgress {
-					trackerWriter = nil
-				}
-
-				action := "Upload: " + filename
-				tracker := NewProgressTracker(trackerWriter, stat.Size(), action)
-				progress := func(bytesSent, totalBytes int64) {
-					tracker.Update(bytesSent)
-				}
-
-				// Hash the data as it is sent, to compare with the server's hash.
-				h := sha256.New()
-				uploadedFile, _, err := client.Files().Upload(ctx, folder.ID, filename, io.TeeReader(f, h),
-					openrelik.WithTotalSize(stat.Size()), openrelik.WithUploadProgress(progress))
-				if err != nil {
-					tracker.Finish()
-					return fmt.Errorf("failed to upload file %s: %w", path, err)
-				}
-				tracker.Finish()
-				if _, err := VerifyUpload(ctx, client, uploadedFile, hex.EncodeToString(h.Sum(nil))); err != nil {
-					return fmt.Errorf("upload of %s: %w", path, err)
-				}
-				fileIDs = append(fileIDs, uploadedFile.ID)
-				totalUploaded += stat.Size()
-				return nil
-			}()
+	for _, i := range toUpload {
+		path := args[i]
+		if id, ok := reused[path]; ok {
+			fileIDs[i] = id
+			continue
+		}
+		err := func() error {
+			f, err := os.Open(path)
 			if err != nil {
-				return nil, 0, err
+				return fmt.Errorf("failed to open file %s: %w", path, err)
 			}
+			defer f.Close()
+
+			stat, err := f.Stat()
+			if err != nil {
+				return fmt.Errorf("failed to stat file %s: %w", path, err)
+			}
+			filename := filepath.Base(path)
+
+			var trackerWriter io.Writer = os.Stderr
+			if !showProgress {
+				trackerWriter = nil
+			}
+
+			action := "Upload: " + filename
+			tracker := NewProgressTracker(trackerWriter, stat.Size(), action)
+			progress := func(bytesSent, totalBytes int64) {
+				tracker.Update(bytesSent)
+			}
+
+			// Hash the data as it is sent, to compare with the server's hash.
+			h := sha256.New()
+			uploadedFile, _, err := client.Files().Upload(ctx, folder.ID, filename, io.TeeReader(f, h),
+				openrelik.WithTotalSize(stat.Size()), openrelik.WithUploadProgress(progress))
+			if err != nil {
+				tracker.Finish()
+				return fmt.Errorf("failed to upload file %s: %w", path, err)
+			}
+			tracker.Finish()
+			if _, err := VerifyUpload(ctx, client, uploadedFile, hex.EncodeToString(h.Sum(nil))); err != nil {
+				return fmt.Errorf("upload of %s: %w", path, err)
+			}
+			fileIDs[i] = uploadedFile.ID
+			totalUploaded += stat.Size()
+			return nil
+		}()
+		if err != nil {
+			return nil, 0, err
 		}
 	}
 
 	return fileIDs, totalUploaded, nil
+}
+
+// ExistingFile is a local file that a folder on the server already holds.
+type ExistingFile struct {
+	Path     string `json:"path"`
+	FileID   int    `json:"file_id"`
+	FolderID int    `json:"folder_id"`
+	Reason   string `json:"reason"`
+}
+
+// FindExisting returns the files among sources that folderID already
+// holds. Only files with the same name and size are compared, so other
+// files cost nothing beyond one listing of the folder. Files with the same
+// SHA256 are returned as duplicates. Files the server has no hash for are
+// returned as unverified instead: hashing is skipped for very large files
+// and runs in the background, so the same name and size is all there is to
+// go on, and memory images of the same machine often share both.
+// Directories (isDir) are left out.
+func FindExisting(ctx context.Context, client *openrelik.Client, folderID int, sources []string, isDir []bool, sizes []int64) (duplicates, unverified []ExistingFile, err error) {
+	if !slices.Contains(isDir, false) {
+		return nil, nil, nil // only directories, which go into new subfolders
+	}
+	existing, _, err := client.Folders().ListFiles(ctx, folderID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for i, p := range sources {
+		if isDir[i] {
+			continue
+		}
+		var localHash string
+		var unhashed *ExistingFile
+		for _, f := range existing {
+			if f.DisplayName != filepath.Base(p) || f.Filesize != sizes[i] {
+				continue
+			}
+			info, _, err := client.Files().Info(ctx, f.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if info.HashSHA256 == "" {
+				if unhashed == nil {
+					unhashed = &ExistingFile{Path: p, FileID: f.ID, FolderID: folderID,
+						Reason: "same name and size; the server has no hash to compare"}
+				}
+				continue
+			}
+			if localHash == "" {
+				if localHash, err = FileSHA256(p); err != nil {
+					return nil, nil, err
+				}
+			}
+			if strings.EqualFold(localHash, info.HashSHA256) {
+				duplicates = append(duplicates, ExistingFile{Path: p, FileID: f.ID, FolderID: folderID, Reason: "same name and SHA256"})
+				unhashed = nil
+				break
+			}
+		}
+		if unhashed != nil {
+			unverified = append(unverified, *unhashed)
+		}
+	}
+	return duplicates, unverified, nil
+}
+
+// FileSHA256 returns the hex SHA256 of the file at path.
+func FileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // DownloadResults fetches the full workflow details and downloads the requested output files.

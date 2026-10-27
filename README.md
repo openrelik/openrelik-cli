@@ -32,11 +32,14 @@ openrelik upload /path/to/local/evidence
 
 ### Worker Execution
 
-Run a worker against an existing remote file by its ID, or provide a local file path to automatically upload and process it:
+Run a worker against a file on the server, by its ID or path, or provide a local file path to automatically upload and process it:
 
 ```bash
 # Run 'strings' on file ID 123
 openrelik run strings 123
+
+# Run 'strings' on a file on the server, by path
+openrelik run strings "Case A/evidence/disk.E01"
 
 # Run 'strings' on a local file
 openrelik run strings suspicious_file.bin
@@ -245,7 +248,7 @@ openrelik workflow wait 99 && openrelik workflow download 99
 
 ### Dynamic Worker Execution (`run`)
 
-Run workers on files. The CLI generates a subcommand for each worker from the local worker cache, which is updated when a workflow starts, when `run --help` is shown, or with `worker list`. When a workflow finishes, the output files of its final tasks are downloaded: the end of a chain, or each worker run with `--and`. Inputs can be server-side file IDs or local paths, which the CLI uploads automatically before running the worker.
+Run workers on files. The CLI generates a subcommand for each worker from the local worker cache, which is updated when a workflow starts, when `run --help` is shown, or with `worker list`. When a workflow finishes, the output files of its final tasks are downloaded: the end of a chain, or each worker run with `--and`. Inputs can be file IDs, paths of files on the server (such as `"Case A/evidence/disk.E01"`, as for `file info`), or local paths, which the CLI uploads automatically before running the worker. A local file isn't uploaded again if the upload folder already holds a file with the same name and SHA256; that file is used instead. An input that isn't a local file and contains a `/` is a server path. If a relative path names both a local file and a file on the server, `run` fails rather than guess: write `./PATH` for the local file, or use the file ID.
 
 *   `run <worker_name> <input>`: Run a specific worker on an input.
 *   Use `--then` to chain workers sequentially (passing output from one to the next).
@@ -261,6 +264,9 @@ openrelik run strings 100
 
 # Run strings on a local file (uploads automatically)
 openrelik run strings suspicious.exe
+
+# Run strings on a file on the server, by path
+openrelik run strings "Case A/evidence/disk.E01"
 
 # Chain strings to grep
 openrelik run strings --then grep --regex "password" 100

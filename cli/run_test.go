@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -609,5 +610,80 @@ func TestRunInterrupted(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(outDir); len(entries) > 0 {
 		t.Errorf("expected nothing downloaded, found %d entries", len(entries))
+	}
+}
+
+func TestRunServerPathInput(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	testWorkers := []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
+		t.Fatal(err)
+	}
+
+	var created string // the body of the request creating the workflow
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch path := r.URL.Path; {
+		case path == "/api/v1/folders/all/":
+			fmt.Fprint(w, `{"folders": [{"id": 7, "display_name": "Case A"}]}`)
+		case path == "/api/v1/folders/7/files/":
+			fmt.Fprint(w, `[{"id": 812, "display_name": "disk.E01"}]`)
+		case strings.HasSuffix(path, "/workflows/"):
+			body, _ := io.ReadAll(r.Body)
+			created = string(body)
+			fmt.Fprint(w, `{"id": 100, "folder": {"id": 1}}`)
+		case strings.HasSuffix(path, "/run/"):
+			fmt.Fprint(w, `{"id": 100, "folder": {"id": 1}}`)
+		case strings.HasSuffix(path, "/status/"):
+			fmt.Fprint(w, `{"status": "SUCCESS", "tasks": [{"uuid": "t1", "display_name": "Strings", "status_short": "SUCCESS"}]}`)
+		case path == "/api/v1/workflows/100":
+			fmt.Fprint(w, `{"id": 100, "tasks": [{"uuid": "t1", "id": 1, "display_name": "Strings"}]}`)
+		case path == "/api/v1/files/5", path == "/api/v1/files/812":
+			fmt.Fprint(w, `{"id": 5, "folder": {"id": 1}}`)
+		default:
+			t.Logf("unhandled %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	if err := config.SaveWorkersCache(server.URL, testWorkers); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+
+	run := func(args ...string) (string, error) {
+		root := NewRootCmd()
+		stdout := new(bytes.Buffer)
+		root.SetOut(stdout)
+		root.SetErr(new(bytes.Buffer))
+		root.SetArgs(args)
+		err := root.Execute()
+		return stdout.String(), err
+	}
+
+	if _, err := run("run", "--download", "none", "strings", "5", "Case A/disk.E01"); err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if !strings.Contains(created, `[5,812]`) {
+		t.Errorf("expected the workflow to get files [5,812], got request %s", created)
+	}
+
+	_, err := run("run", "--download", "none", "strings", "Case A/typo.E01")
+	want := `"Case A/typo.E01" is neither a local file nor a file on the server: no file named "typo.E01" in Case A/`
+	if err == nil || err.Error() != want {
+		t.Errorf("error = %v, want %q", err, want)
+	}
+	if code := exitCode(err); code != exitNotFound {
+		t.Errorf("exit code %d, want %d", code, exitNotFound)
+	}
+
+	// A dry run doesn't contact the server.
+	server.Close()
+	out, err := run("run", "--dry-run", "strings", "Case A/disk.E01")
+	if err != nil || !strings.Contains(out, `"workflow"`) {
+		t.Errorf("dry run: %v\n%s", err, out)
 	}
 }

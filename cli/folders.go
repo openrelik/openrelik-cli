@@ -500,6 +500,7 @@ const searchPathConcurrency = 8
 
 func newSearchFoldersCmd() *cobra.Command {
 	var opts listOptions
+	var rootOnly, latest bool
 
 	cmd := &cobra.Command{
 		Use:   "search <TERM>",
@@ -513,7 +514,11 @@ that take a folder, such as 'folder list'.
 Like 'folder list', results are sorted by last update with the most
 recently updated folder last; use --sort name and -r to change the order.
 By default the 30 most recently updated matches are shown; use --limit N
-to show more, or --limit 0 to show all.`,
+to show more, or --limit 0 to show all. Use --latest to show only the most
+recently updated match (the same as --limit 1).
+
+Use --root to search only the folders that 'folder list' shows without a
+folder: your root folders and folders shared with you.`,
 		Example: `  # Find folders with "plaso" in their name
   openrelik folder search plaso
 
@@ -522,6 +527,9 @@ to show more, or --limit 0 to show all.`,
 
   # Show all matches, sorted by name
   openrelik folder search case --limit 0 --sort name
+
+  # Find the most recently updated root folder with "case" in its name
+  openrelik folder search case --root --latest
 
   # Print the IDs of matching folders
   openrelik folder search evidence --format json | jq '.[].id'`,
@@ -535,13 +543,21 @@ to show more, or --limit 0 to show all.`,
 			if term == "" {
 				return fmt.Errorf("search term must not be empty")
 			}
+			if latest {
+				opts.limit = 1
+			}
 
 			client, err := newClient()
 			if err != nil {
 				return err
 			}
 
-			folders, err := fetchFolderSearch(cmd.Context(), client, term)
+			var folders []openrelik.Folder
+			if rootOnly {
+				folders, err = searchRootFolders(cmd.Context(), client, term)
+			} else {
+				folders, err = fetchFolderSearch(cmd.Context(), client, term)
+			}
 			if err != nil {
 				return err
 			}
@@ -560,7 +576,11 @@ to show more, or --limit 0 to show all.`,
 			}
 
 			if total == 0 && !quiet && outputFormat == "human" {
-				fmt.Fprintf(cmd.ErrOrStderr(), "No folders match %q.\n", term)
+				what := "folders"
+				if rootOnly {
+					what = "root folders"
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "No %s match %q.\n", what, term)
 			}
 			view := &FolderSearchView{}
 			for _, e := range entries {
@@ -569,13 +589,35 @@ to show more, or --limit 0 to show all.`,
 			if err := formatAndPrint(cmd, view); err != nil {
 				return err
 			}
-			printTruncationHint(cmd, len(entries), total, "folders", "Use --limit N to see more, or --limit 0 for all.")
+			if !latest {
+				printTruncationHint(cmd, len(entries), total, "folders", "Use --limit N to see more, or --limit 0 for all.")
+			}
 			return nil
 		},
 	}
 
 	opts.addFlags(cmd, 30)
+	cmd.Flags().BoolVar(&rootOnly, "root", false, "Search only root folders and folders shared with you")
+	cmd.Flags().BoolVar(&latest, "latest", false, "Show only the most recently updated match (same as --limit 1)")
+	cmd.MarkFlagsMutuallyExclusive("latest", "limit")
 	return cmd
+}
+
+// searchRootFolders returns the folders 'folder list' shows at the top level
+// whose names contain term, ignoring case like the server's search.
+func searchRootFolders(ctx context.Context, client *openrelik.Client, term string) ([]openrelik.Folder, error) {
+	roots, err := util.ListAllRootFolders(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	term = strings.ToLower(term)
+	var matches []openrelik.Folder
+	for _, f := range roots {
+		if strings.Contains(strings.ToLower(f.DisplayName), term) {
+			matches = append(matches, f)
+		}
+	}
+	return matches, nil
 }
 
 // fetchFolderSearch pages through the folder search results for term.

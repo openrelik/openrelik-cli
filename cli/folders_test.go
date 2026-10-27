@@ -761,6 +761,15 @@ func newSearchServer(t *testing.T, count int, failGet bool) *searchServer {
 	s := &searchServer{}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/folders/all/" && r.URL.Query().Get("q") == "" {
+			// The root listing used by --root: two matches and one other.
+			fmt.Fprint(w, `{"folders": [
+				{"id": 201, "display_name": "Match root A", "updated_at": "2026-03-01T00:00:00Z"},
+				{"id": 202, "display_name": "match root B", "updated_at": "2026-02-01T00:00:00Z"},
+				{"id": 203, "display_name": "unrelated", "updated_at": "2026-04-01T00:00:00Z"}
+			], "page": 1, "page_size": 100, "total_count": 3}`)
+			return
+		}
 		if r.URL.Path == "/api/v1/folders/all/" {
 			s.mu.Lock()
 			s.queries = append(s.queries, r.URL.Query().Get("q"))
@@ -827,6 +836,9 @@ func TestFolderSearch(t *testing.T) {
 		},
 		{name: "limit 0 shows all across pages", count: 150, args: []string{"match", "--limit", "0"}, wantGets: 150},
 		{name: "reverse", count: 3, args: []string{"match", "-r"}, wantRows: []string{"3", "2", "1"}, wantGets: 3},
+		{name: "latest shows only the newest match", count: 40, args: []string{"match", "--latest"}, wantRows: []string{"40"}, wantGets: 1},
+		{name: "root searches only root folders", count: 40, args: []string{"MATCH", "--root"}, wantRows: []string{"202", "201"}, wantGets: 2},
+		{name: "root with latest", count: 40, args: []string{"match", "--root", "--latest"}, wantRows: []string{"201"}, wantGets: 1},
 		{name: "term is trimmed", count: 1, args: []string{"  untitled workflow "}, wantRows: []string{"1"}, wantGets: 1, wantQuery: "untitled workflow"},
 	}
 
@@ -926,6 +938,7 @@ func TestFolderSearchErrors(t *testing.T) {
 		{name: "empty term", args: []string{"  "}, wantErr: "search term must not be empty"},
 		{name: "split term", args: []string{"untitled", "workflow"}, wantErr: `Quote TERM if it contains spaces: "untitled workflow"`},
 		{name: "invalid sort", args: []string{"x", "--sort", "size"}, wantErr: "invalid sort"},
+		{name: "latest and limit conflict", args: []string{"x", "--latest", "--limit", "2"}, wantErr: "[latest limit] were all set"},
 		{name: "path lookup fails", failGet: true, args: []string{"match"}, wantErr: "failed to look up folder"},
 	}
 	for _, tt := range tests {
@@ -1119,5 +1132,21 @@ func TestLatestFolder(t *testing.T) {
 		if got := latestFolder(tt.folders).ID; got != tt.want {
 			t.Errorf("%s: got %d, want %d", tt.name, got, tt.want)
 		}
+	}
+}
+
+func TestFolderSearchRootNoMatches(t *testing.T) {
+	server := newSearchServer(t, 3, false)
+	defer server.Close()
+
+	_, stderr, err := runSearch(t, server, "nothing", "--root")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if !strings.Contains(stderr, `No root folders match "nothing".`) {
+		t.Errorf("unexpected stderr %q", stderr)
+	}
+	if len(server.queries) != 0 {
+		t.Errorf("--root must not use the server search, got queries %q", server.queries)
 	}
 }

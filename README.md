@@ -66,6 +66,9 @@ Enforce JSON output to integrate with command-line JSON processors like `jq`:
 
 ```bash
 openrelik folder list --format json | jq '.folders[].id'
+
+# Get the ID of "Case 7", creating the folder only if it doesn't exist yet
+openrelik folder create "Case 7" --exist-ok --format json | jq .id
 openrelik folder list 42 --format json | jq '.files[].id'
 ```
 
@@ -121,7 +124,7 @@ Organize files in hierarchical directories.
 *   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"`; an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
 *   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list` and the `--folder`/`--parent` flags. Shows the 30 most recently updated matches by default; use `--limit N` to show more or `--limit 0` for all. `--sort` and `-r` work as in `folder list`.
 *   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name; use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes.
-*   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder.
+*   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder. Use `--exist-ok` to print an existing folder with the same name in that location instead of creating a duplicate, which makes scripts safe to re-run. If several such folders exist it fails and lists them; add `--latest` to use the most recently updated one.
 
 #### Examples
 

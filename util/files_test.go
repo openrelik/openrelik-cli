@@ -91,9 +91,13 @@ func TestResolveInputs(t *testing.T) {
 		client, _ := openrelik.NewClient(server.URL, "test-key")
 		ctx := context.Background()
 
+		mux.HandleFunc("/api/v1/users/me/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id": 7, "username": "me"}`)
+		})
 		mux.HandleFunc("/api/v1/folders/all/", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"folders": [{"id": 2, "display_name": "Custom Folder"}]}`)
+			fmt.Fprint(w, `{"folders": [{"id": 2, "display_name": "Custom Folder", "user": {"id": 7}}]}`)
 		})
 		mux.HandleFunc("/api/v1/files/upload", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost {

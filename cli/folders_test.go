@@ -943,3 +943,181 @@ func TestFolderSearchErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestFolderCreateExistOK(t *testing.T) {
+	tests := []struct {
+		name           string
+		args           []string
+		wantOutput     string
+		wantRoots      []string
+		wantSubfolders []string
+		wantErr        []string
+	}{
+		{
+			name:       "existing root folder",
+			args:       []string{"Case A", "--exist-ok"},
+			wantOutput: `Folder "Case A" already exists (ID 42)`,
+		},
+		{
+			name:       "missing root folder is created",
+			args:       []string{"Case B", "--exist-ok"},
+			wantOutput: `Folder "Case B" created (ID 501)`,
+			wantRoots:  []string{"Case B"},
+		},
+		{
+			name:       "root folder shared by someone else is not reused",
+			args:       []string{"Shared", "--exist-ok"},
+			wantOutput: `Folder "Shared" created (ID 501)`,
+			wantRoots:  []string{"Shared"},
+		},
+		{
+			name:       "existing subfolder by parent path",
+			args:       []string{"evidence", "--parent", "Case A/", "--exist-ok"},
+			wantOutput: `Folder "evidence" already exists (ID 43)`,
+		},
+		{
+			name:           "missing subfolder is created",
+			args:           []string{"logs", "--parent", "Case A/", "--exist-ok"},
+			wantOutput:     `Folder "logs" created (ID 501)`,
+			wantSubfolders: []string{"42/logs"},
+		},
+		{
+			name:       "without --exist-ok a duplicate is created",
+			args:       []string{"Case A"},
+			wantOutput: `Folder "Case A" created (ID 501)`,
+			wantRoots:  []string{"Case A"},
+		},
+		{
+			name:       "several existing folders with --latest uses the most recently updated",
+			args:       []string{"Dup", "--exist-ok", "--latest"},
+			wantOutput: `Folder "Dup" already exists (ID 44)`,
+		},
+		{
+			name:    "--latest needs --exist-ok",
+			args:    []string{"Dup", "--latest"},
+			wantErr: []string{"--latest can only be used with --exist-ok"},
+		},
+		{
+			name:    "several existing folders",
+			args:    []string{"Dup", "--exist-ok"},
+			wantErr: []string{`multiple folders named "Dup" already exist`, "ID", "OWNER", "\n44 ", "\n45 ", "Use one of the IDs above, or add --latest"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			t.Setenv("OPENRELIK_API_KEY", "test-key")
+			t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+			root := NewRootCmd()
+			stdout := new(bytes.Buffer)
+			root.SetOut(stdout)
+			root.SetErr(new(bytes.Buffer))
+			root.SetArgs(append([]string{"folder", "create"}, tt.args...))
+			err := root.Execute()
+
+			if len(tt.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+				for _, want := range tt.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("expected error to contain %q, got:\n%s", want, err)
+					}
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Execute() failed: %v", err)
+				}
+				if !strings.Contains(stdout.String(), tt.wantOutput) {
+					t.Errorf("expected output %q, got %q", tt.wantOutput, stdout.String())
+				}
+			}
+			if strings.Join(server.roots, ",") != strings.Join(tt.wantRoots, ",") {
+				t.Errorf("created root folders %q, want %q", server.roots, tt.wantRoots)
+			}
+			if strings.Join(server.subfolders, ",") != strings.Join(tt.wantSubfolders, ",") {
+				t.Errorf("created subfolders %q, want %q", server.subfolders, tt.wantSubfolders)
+			}
+		})
+	}
+}
+
+func TestFolderCreateJSONReportsCreated(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		want bool
+	}{{"Case A", false}, {"Case B", true}} {
+		server := newUploadServer(t)
+		t.Setenv("OPENRELIK_API_KEY", "test-key")
+		t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+		root := NewRootCmd()
+		stdout := new(bytes.Buffer)
+		root.SetOut(stdout)
+		root.SetErr(new(bytes.Buffer))
+		root.SetArgs([]string{"folder", "create", tt.name, "--exist-ok", "--format", "json"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%s: Execute() failed: %v", tt.name, err)
+		}
+		var got struct {
+			ID      int  `json:"id"`
+			Created bool `json:"created"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatalf("%s: invalid JSON: %v\n%s", tt.name, err, stdout)
+		}
+		if got.Created != tt.want || got.ID == 0 {
+			t.Errorf("%s: got %+v, want created=%v", tt.name, got, tt.want)
+		}
+		server.Close()
+	}
+}
+
+func TestFolderCreateLatestNote(t *testing.T) {
+	for _, tt := range []struct {
+		args     []string
+		wantNote bool
+	}{
+		{[]string{"Dup", "--exist-ok", "--latest"}, true},
+		{[]string{"Dup", "--exist-ok", "--latest", "--format", "json"}, false},
+		{[]string{"Dup", "--exist-ok", "--latest", "--quiet"}, false},
+	} {
+		server := newUploadServer(t)
+		t.Setenv("OPENRELIK_API_KEY", "test-key")
+		t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+		root := NewRootCmd()
+		stderr := new(bytes.Buffer)
+		root.SetOut(new(bytes.Buffer))
+		root.SetErr(stderr)
+		root.SetArgs(append([]string{"folder", "create"}, tt.args...))
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%v: Execute() failed: %v", tt.args, err)
+		}
+		hasNote := strings.Contains(stderr.String(), `2 folders named "Dup" exist; using the most recently updated.`)
+		if hasNote != tt.wantNote {
+			t.Errorf("%v: note shown = %v, want %v (stderr %q)", tt.args, hasNote, tt.wantNote, stderr.String())
+		}
+		server.Close()
+	}
+}
+
+func TestLatestFolder(t *testing.T) {
+	at := func(day int) time.Time { return time.Date(2026, 1, day, 0, 0, 0, 0, time.UTC) }
+	tests := []struct {
+		name    string
+		folders []openrelik.Folder
+		want    int
+	}{
+		{"newest update wins over higher ID", []openrelik.Folder{{ID: 1, UpdatedAt: at(3)}, {ID: 2, UpdatedAt: at(2)}}, 1},
+		{"newest update anywhere in the list", []openrelik.Folder{{ID: 1, UpdatedAt: at(1)}, {ID: 2, UpdatedAt: at(1)}, {ID: 3, UpdatedAt: at(5)}}, 3},
+		{"tie goes to the higher ID", []openrelik.Folder{{ID: 9, UpdatedAt: at(1)}, {ID: 4, UpdatedAt: at(1)}}, 9},
+	}
+	for _, tt := range tests {
+		if got := latestFolder(tt.folders).ID; got != tt.want {
+			t.Errorf("%s: got %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}

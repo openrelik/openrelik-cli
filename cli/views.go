@@ -34,15 +34,28 @@ func (v *FileInfoView) UnwrapJSON() any { return v.File }
 
 // --- Folders ---
 
-// FolderCreatedView renders a one-line confirmation after folder creation.
-type FolderCreatedView struct{ *openrelik.Folder }
+// FolderCreatedView renders a one-line confirmation after folder creation,
+// or after finding an existing folder with 'folder create --exist-ok'.
+type FolderCreatedView struct {
+	*openrelik.Folder
+	Created bool
+}
 
 func (v *FolderCreatedView) RenderHuman(w io.Writer) error {
-	fmt.Fprintf(w, "Folder %q created (ID %d)\n", v.DisplayName, v.ID)
+	verb := "created"
+	if !v.Created {
+		verb = "already exists"
+	}
+	fmt.Fprintf(w, "Folder %q %s (ID %d)\n", v.DisplayName, verb, v.ID)
 	return nil
 }
 
-func (v *FolderCreatedView) UnwrapJSON() any { return v.Folder }
+func (v *FolderCreatedView) UnwrapJSON() any {
+	return struct {
+		*openrelik.Folder
+		Created bool `json:"created"`
+	}{v.Folder, v.Created}
+}
 
 // UploadView renders the result of 'folder upload': the root folder it
 // created, if any, and one line per uploaded file.

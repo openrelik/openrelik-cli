@@ -108,7 +108,7 @@ recently updated entries, in the selected sort order.`,
 				folders, files, err = fetchFolderContents(cmd.Context(), client, fID)
 				noun = "items"
 			} else {
-				folders, err = fetchAllRootFolders(cmd.Context(), client)
+				folders, err = util.ListAllRootFolders(cmd.Context(), client)
 			}
 
 			if err != nil {
@@ -206,7 +206,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 		return 0, fmt.Errorf("invalid folder path %q", path)
 	}
 
-	roots, err := fetchAllRootFolders(ctx, client)
+	roots, err := util.ListAllRootFolders(ctx, client)
 	if err != nil {
 		return 0, err
 	}
@@ -304,22 +304,6 @@ func fetchFolderContents(ctx context.Context, client *openrelik.Client, folderID
 	return folders, files, nil
 }
 
-// fetchAllRootFolders pages through the root folders endpoint and returns
-// every root folder.
-func fetchAllRootFolders(ctx context.Context, client *openrelik.Client) ([]openrelik.Folder, error) {
-	var folders []openrelik.Folder
-	for page := 1; ; page++ {
-		result, _, err := client.Folders().ListRootFoldersPage(ctx, &openrelik.ListOptions{Page: page, PageSize: folderPageSize})
-		if err != nil {
-			return nil, err
-		}
-		folders = append(folders, result.Folders...)
-		if len(result.Folders) == 0 || len(folders) >= result.TotalCount {
-			return folders, nil
-		}
-	}
-}
-
 // listEntry is a single row in a folder listing: either a folder or a file.
 type listEntry struct {
 	folder *openrelik.Folder
@@ -394,6 +378,8 @@ func sortEntries(entries []listEntry, sortBy string, reverse bool) {
 
 func newCreateFolderCmd() *cobra.Command {
 	var parent string
+	var existOK bool
+	var latest bool
 
 	cmd := &cobra.Command{
 		Use:   "create <NAME>",
@@ -402,7 +388,14 @@ func newCreateFolderCmd() *cobra.Command {
 
 Without --parent, creates a root-level folder. With --parent, creates a
 subfolder inside the specified parent folder. The parent is a folder ID
-or a path of folder names, as accepted by 'folder list'.`,
+or a path of folder names, as accepted by 'folder list'.
+
+With --exist-ok, if a folder with exactly this name already exists in that
+location, it is printed instead of creating a duplicate; at the root, only
+folders you own count. If several such folders exist, the command fails
+and lists them; add --latest to use the most recently updated one instead.
+This makes scripts safe to re-run, but it is not atomic: two runs at the
+same moment can still both create the folder.`,
 		Example: `  # Create a root folder
   openrelik folder create "Investigations"
 
@@ -410,7 +403,13 @@ or a path of folder names, as accepted by 'folder list'.`,
   openrelik folder create "Case 2024-001" --parent 42
 
   # Create a subfolder by parent path
-  openrelik folder create "logs" --parent "Case A/evidence/"`,
+  openrelik folder create "logs" --parent "Case A/evidence/"
+
+  # Get the ID of "Case 7", creating it only if it doesn't exist
+  openrelik folder create "Case 7" --exist-ok --format json | jq .id
+
+  # Same, using the most recently updated "Case 7" if there are several
+  openrelik folder create "Case 7" --exist-ok --latest`,
 		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := newClient()
@@ -418,15 +417,38 @@ or a path of folder names, as accepted by 'folder list'.`,
 				return err
 			}
 
+			if latest && !existOK {
+				return fmt.Errorf("--latest can only be used with --exist-ok")
+			}
+
 			name := args[0]
-			var folder *openrelik.Folder
+			var parentID int
 			if cmd.Flags().Changed("parent") {
-				parentID, err := resolveFolder(cmd.Context(), client, parent)
+				parentID, err = resolveFolder(cmd.Context(), client, parent)
 				if err != nil {
 					return err
 				}
+			}
+
+			var folder *openrelik.Folder
+			created := true
+			switch {
+			case existOK:
+				folder, created, err = util.FindOrCreateFolder(cmd.Context(), client, parentID, name)
+				var multiple *util.MultipleFoldersError
+				if errors.As(err, &multiple) {
+					if !latest {
+						return existingFoldersError(multiple)
+					}
+					folder, err = latestFolder(multiple.Matches), nil
+					if !quiet && outputFormat == "human" {
+						fmt.Fprintf(cmd.ErrOrStderr(), "%d folders named %q exist; using the most recently updated.\n",
+							len(multiple.Matches), name)
+					}
+				}
+			case parentID != 0:
 				folder, _, err = client.Folders().CreateSubFolder(cmd.Context(), parentID, name)
-			} else {
+			default:
 				folder, _, err = client.Folders().CreateRootFolder(cmd.Context(), name)
 			}
 
@@ -434,12 +456,42 @@ or a path of folder names, as accepted by 'folder list'.`,
 				return err
 			}
 
-			return formatAndPrint(cmd, &FolderCreatedView{Folder: folder})
+			return formatAndPrint(cmd, &FolderCreatedView{Folder: folder, Created: created})
 		},
 	}
 
 	cmd.Flags().StringVarP(&parent, "parent", "p", "", "Parent folder ID or path")
+	cmd.Flags().BoolVar(&existOK, "exist-ok", false, "If a folder with this name already exists here, print it instead of creating a duplicate")
+	cmd.Flags().BoolVar(&latest, "latest", false, "With --exist-ok, use the most recently updated folder if several exist")
 	return cmd
+}
+
+// latestFolder returns the most recently updated folder, preferring the
+// higher (newer) ID when update times are equal.
+func latestFolder(folders []openrelik.Folder) *openrelik.Folder {
+	latest := &folders[0]
+	for i := range folders[1:] {
+		f := &folders[i+1]
+		if f.UpdatedAt.After(latest.UpdatedAt) || (f.UpdatedAt.Equal(latest.UpdatedAt) && f.ID > latest.ID) {
+			latest = f
+		}
+	}
+	return latest
+}
+
+// existingFoldersError lists the folders that made 'folder create
+// --exist-ok' ambiguous so the user can pick one by ID.
+func existingFoldersError(e *util.MultipleFoldersError) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s:\n\n", e.Error())
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tOWNER\tUPDATED")
+	for _, f := range e.Matches {
+		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.User.Username, util.FormatTimeAgo(f.UpdatedAt))
+	}
+	tw.Flush()
+	b.WriteString("\nUse one of the IDs above, or add --latest to use the most recently updated.")
+	return errors.New(b.String())
 }
 
 // searchPathConcurrency is the number of folder lookups run in parallel to

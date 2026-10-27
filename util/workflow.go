@@ -16,6 +16,7 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,26 +68,15 @@ func IsTerminalTaskStatus(status string) bool {
 	return s == "success" || s == "failure" || s == "complete" || s == "completed"
 }
 
-// GetOrCreateFolder finds or creates a folder with the given name in the root.
+// GetOrCreateFolder returns the user's root folder named folderName,
+// creating it if needed. If several exist, the first is used.
 func GetOrCreateFolder(ctx context.Context, client *openrelik.Client, folderName string) (*openrelik.Folder, error) {
-	folders, _, err := client.Folders().ListRootFolders(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list root folders: %w", err)
+	folder, _, err := FindOrCreateFolder(ctx, client, 0, folderName)
+	var multiple *MultipleFoldersError
+	if errors.As(err, &multiple) {
+		return &multiple.Matches[0], nil
 	}
-
-	for _, f := range folders {
-		if f.DisplayName == folderName {
-			return &f, nil
-		}
-	}
-
-	// Create it
-	folder, _, err := client.Folders().CreateRootFolder(ctx, folderName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create folder %s: %w", folderName, err)
-	}
-
-	return folder, nil
+	return folder, err
 }
 
 // WorkflowMonitor handles polling and UI for workflow status.

@@ -38,8 +38,17 @@ func newUploadServer(t *testing.T) *uploadServer {
 			// A small tree for resolving --folder and --parent paths:
 			// /Case A/ (42) containing /evidence/ (43).
 			switch r.URL.Path {
+			case "/api/v1/users/me/":
+				fmt.Fprint(w, `{"id": 7, "username": "me"}`)
 			case "/api/v1/folders/all/":
-				fmt.Fprint(w, `{"folders": [{"id": 42, "display_name": "Case A"}], "page": 1, "page_size": 100, "total_count": 1}`)
+				// The current user (7) owns "Case A" and two "Dup" folders,
+				// of which 44 was updated last; "Shared" belongs to someone else.
+				fmt.Fprint(w, `{"folders": [
+					{"id": 42, "display_name": "Case A", "user": {"id": 7, "username": "me"}},
+					{"id": 44, "display_name": "Dup", "user": {"id": 7, "username": "me"}, "updated_at": "2026-02-01T00:00:00Z"},
+					{"id": 45, "display_name": "Dup", "user": {"id": 7, "username": "me"}, "updated_at": "2026-01-01T00:00:00Z"},
+					{"id": 46, "display_name": "Shared", "user": {"id": 8, "username": "other"}}
+				], "page": 1, "page_size": 100, "total_count": 4}`)
 			case "/api/v1/folders/42/folders/":
 				fmt.Fprint(w, `[{"id": 43, "display_name": "evidence"}]`)
 			case "/api/v1/folders/43/folders/":

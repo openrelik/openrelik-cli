@@ -29,8 +29,10 @@ Without FOLDER, shows all root folders and everything below them. FOLDER is
 a folder ID or a path of folder names, as accepted by 'folder list'. Each
 entry shows its ID in brackets; folder names end in '/'.
 
-Entries are sorted by name; use --sort time to sort by last update (oldest
-first) and -r to reverse the order. Use --level N to limit the depth and
+Entries are sorted by name, like 'tree', so the folder structure is easy to
+scan. ('folder list' and 'folder search' sort by last update instead, like
+'ls -latr'.) Use --sort time to sort by last update (oldest first) and -r to
+reverse the order. Use --level N to limit the depth and
 --folders-only to leave out files, which also makes large trees faster to
 fetch. Use --size to show file sizes.`,
 		Example: `  # Show everything below folder 42
@@ -50,7 +52,7 @@ fetch. Use --size to show file sizes.`,
 				return err
 			}
 			if level < 0 {
-				return fmt.Errorf("invalid level: %d (must be 0 or greater)", level)
+				return usageErrorf("invalid level: %d (must be 0 or greater)", level)
 			}
 
 			client, err := newClient()

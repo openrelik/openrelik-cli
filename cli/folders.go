@@ -61,8 +61,10 @@ separate, so pass folder IDs to 'folder list' and file IDs to commands
 such as 'file info'.
 
 Like 'ls -latr', entries are sorted by last update with the most
-recently updated entry last. Use --sort name to sort by name and
--r to reverse the sort order. Use --limit N to show only the N most
+recently updated entry last, so the latest work ends up next to the
+prompt. ('folder tree' sorts by name instead, like 'tree', since update
+times would scatter the folder structure.) Use --sort name to sort by name
+and -r to reverse the sort order. Use --limit N to show only the N most
 recently updated entries, in the selected sort order.`,
 		Example: `  # List all root folders, most recently updated last
   openrelik folder list
@@ -156,10 +158,10 @@ func (o *listOptions) addFlags(cmd *cobra.Command, defaultLimit int) {
 
 func (o *listOptions) validate() error {
 	if o.limit < 0 {
-		return fmt.Errorf("invalid limit: %d (must be 0 or greater)", o.limit)
+		return usageErrorf("invalid limit: %d (must be 0 or greater)", o.limit)
 	}
 	if o.sortBy != "time" && o.sortBy != "name" {
-		return fmt.Errorf("invalid sort: %q (must be time or name)", o.sortBy)
+		return usageErrorf("invalid sort: %q (must be time or name)", o.sortBy)
 	}
 	return nil
 }
@@ -174,7 +176,7 @@ func resolveFolder(ctx context.Context, client *openrelik.Client, arg string) (i
 	if folderIDPattern.MatchString(arg) {
 		id, err := strconv.Atoi(arg)
 		if err != nil || id == 0 {
-			return 0, fmt.Errorf("invalid folder ID: %s", arg)
+			return 0, usageErrorf("invalid folder ID: %s", arg)
 		}
 		return id, nil
 	}
@@ -194,11 +196,11 @@ func formatFolderPath(names []string) string {
 	return "/" + strings.Join(names, "/") + "/"
 }
 
-// folderNotFoundError is returned by resolveFolderPath when no folder
-// matches the path, as opposed to the server failing to answer.
-type folderNotFoundError string
+// notFoundError is returned when no folder or file matches a path, as
+// opposed to the server failing to answer.
+type notFoundError string
 
-func (e folderNotFoundError) Error() string { return string(e) }
+func (e notFoundError) Error() string { return string(e) }
 
 // resolveFolderPath walks a path like "Case A/evidence/" from the root
 // folders. Every branch whose names match is followed, so a path is only
@@ -211,7 +213,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 		}
 	}
 	if len(segments) == 0 {
-		return 0, fmt.Errorf("invalid folder path %q", path)
+		return 0, usageErrorf("invalid folder path %q", path)
 	}
 
 	roots, err := util.ListAllRootFolders(ctx, client)
@@ -220,7 +222,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 	}
 	matches := matchFolderName(roots, segments[0], nil)
 	if len(matches) == 0 {
-		return 0, folderNotFoundError(fmt.Sprintf("no root folder named %q", segments[0]))
+		return 0, notFoundError(fmt.Sprintf("no root folder named %q", segments[0]))
 	}
 
 	for i, seg := range segments[1:] {
@@ -233,7 +235,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 			next = append(next, matchFolderName(subfolders, seg, m.path)...)
 		}
 		if len(next) == 0 {
-			return 0, folderNotFoundError(fmt.Sprintf("no folder named %q in %s", seg, formatFolderPath(segments[:i+1])))
+			return 0, notFoundError(fmt.Sprintf("no folder named %q in %s", seg, formatFolderPath(segments[:i+1])))
 		}
 		matches = next
 	}
@@ -275,7 +277,7 @@ func ambiguousFolderError(path string, matches []folderMatch) error {
 	fmt.Fprintln(tw, "ID\tLOCATION\tOWNER\tUPDATED")
 	for _, m := range matches {
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", m.folder.ID, m.location(),
-			m.folder.User.Username, util.FormatTimeAgo(m.folder.UpdatedAt))
+			m.folder.User.Username, util.FormatTime(m.folder.UpdatedAt))
 	}
 	tw.Flush()
 	b.WriteString("\nUse one of the IDs above instead of the path.")
@@ -482,7 +484,7 @@ func existingFoldersError(e *util.MultipleFoldersError) error {
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tOWNER\tUPDATED")
 	for _, f := range e.Matches {
-		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.User.Username, util.FormatTimeAgo(f.UpdatedAt))
+		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.User.Username, util.FormatTime(f.UpdatedAt))
 	}
 	tw.Flush()
 	b.WriteString("\nUse one of the IDs above, or add --latest to use the most recently updated.")
@@ -503,14 +505,16 @@ func newSearchFoldersCmd() *cobra.Command {
 		Long: `Search every folder you can access, including subfolders and folders
 shared with you, for names containing TERM (case-insensitive).
 
-Results show each folder's full path, which can be passed to commands
-that take a folder, such as 'folder list'.
+Results show each folder's full path from the root folders, such as
+"/Case A/evidence/". The path can be passed as it is to commands that take
+a folder, such as 'folder list'; the leading and trailing "/" are optional,
+so "Case A/evidence" is the same folder.
 
 Like 'folder list', results are sorted by last update with the most
 recently updated folder last; use --sort name and -r to change the order.
-By default the 30 most recently updated matches are shown; use --limit N
-to show more, or --limit 0 to show all. Use --latest to show only the most
-recently updated match (the same as --limit 1).
+All matches are shown; use --limit N to show only the N most recently
+updated. Use --latest to show only the most recently updated match (the
+same as --limit 1).
 
 Use --root to search only the folders that 'folder list' shows without a
 folder: your root folders and folders shared with you.`,
@@ -520,8 +524,8 @@ folder: your root folders and folders shared with you.`,
   # Quote terms that contain spaces
   openrelik folder search "untitled workflow"
 
-  # Show all matches, sorted by name
-  openrelik folder search case --limit 0 --sort name
+  # Show the 10 most recently updated matches, sorted by name
+  openrelik folder search case --limit 10 --sort name
 
   # Find the most recently updated root folder with "case" in its name
   openrelik folder search case --root --latest
@@ -584,13 +588,13 @@ folder: your root folders and folders shared with you.`,
 				return err
 			}
 			if !latest {
-				printTruncationHint(cmd, len(entries), total, "folders", "Use --limit N to see more, or --limit 0 for all.")
+				printTruncationHint(cmd, len(entries), total, "folders", "Omit --limit to see all.")
 			}
 			return nil
 		},
 	}
 
-	opts.addFlags(cmd, 30)
+	opts.addFlags(cmd, 0)
 	cmd.Flags().BoolVar(&rootOnly, "root", false, "Search only root folders and folders shared with you")
 	cmd.Flags().BoolVar(&latest, "latest", false, "Show only the most recently updated match (same as --limit 1)")
 	cmd.MarkFlagsMutuallyExclusive("latest", "limit")

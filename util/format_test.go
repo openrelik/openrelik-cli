@@ -32,7 +32,7 @@ func TestFprintStruct(t *testing.T) {
 			contains: []string{
 				"ID            1",
 				"Display Name  Test Item",
-				"Created       " + now.Format(time.RFC3339),
+				"Created       " + now.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -41,7 +41,7 @@ func TestFprintStruct(t *testing.T) {
 			contains: []string{
 				"ID            1",
 				"Display Name  Test Item",
-				"Created       " + now.Format(time.RFC3339),
+				"Created       " + now.UTC().Format(time.RFC3339),
 			},
 		},
 		{
@@ -202,5 +202,21 @@ func TestFprintTable(t *testing.T) {
 	}
 	if !strings.Contains(output, "2") || !strings.Contains(output, "Item 2") || !strings.Contains(output, "FAIL") {
 		t.Errorf("expected row 2 not found in output:\n%s", output)
+	}
+}
+
+func TestFormatTime(t *testing.T) {
+	cet := time.FixedZone("CET", 3600)
+	ts := time.Date(2026, 10, 27, 20, 53, 42, 123456000, cet)
+	if got, want := FormatTime(ts), "2026-10-27T19:53:42Z"; got != want {
+		t.Errorf("FormatTime() = %q, want %q", got, want)
+	}
+	if got := FormatTime(time.Time{}); got != "-" {
+		t.Errorf("FormatTime(zero) = %q, want %q", got, "-")
+	}
+	recent := time.Now().Add(-2 * time.Hour)
+	want := recent.UTC().Format(time.RFC3339) + " (about 2 hours ago)"
+	if got := FormatTimeWithAge(recent); got != want {
+		t.Errorf("FormatTimeWithAge() = %q, want %q", got, want)
 	}
 }

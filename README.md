@@ -32,11 +32,14 @@ openrelik upload /path/to/local/evidence
 
 ### Worker Execution
 
-Run a worker against an existing remote file by its ID, or provide a local file path to automatically upload and process it:
+Run a worker against a file on the server, by its ID or path, or provide a local file path to automatically upload and process it:
 
 ```bash
 # Run 'strings' on file ID 123
 openrelik run strings 123
+
+# Run 'strings' on a file on the server, by path
+openrelik run strings "Case A/evidence/disk.E01"
 
 # Run 'strings' on a local file
 openrelik run strings suspicious_file.bin
@@ -80,19 +83,38 @@ This section provides a detailed reference of the CLI commands and options.
 
 ### Global Flags
 
-These flags modify output behavior for all commands:
+These flags apply to all commands:
 
-*   `--format`: Set output styling to `human`, `json`, or `verbose`.
+*   `--format`: Set output styling to `human`, `json`, or `verbose`. Any other value is an error.
 *   `--quiet`, `-q`: Suppress all output.
+*   `--server`: Use this server instead of the active one, with the API key saved for it (or `OPENRELIK_API_KEY`).
+*   `--debug`: Show errors from the server as they were received, with the request that failed, instead of a plain description.
+
+Ctrl-C stops a command cleanly (a second Ctrl-C ends it at once). Interrupting `run` doesn't stop the workflow on the server; the message says how to follow it.
+
+### Exit Status
+
+| Status | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Any other error, including a workflow that failed |
+| 2 | The command line is wrong: an unknown command or flag, missing or extra arguments, or an invalid value |
+| 3 | A file, folder, workflow or other resource doesn't exist |
+| 4 | No server or API key is set, the server didn't accept the API key, or permission was denied |
+| 5 | The server can't be reached or failed to handle the request; worth retrying |
+| 130 | Interrupted with Ctrl-C |
+
+Progress bars and colours are only shown when stderr is a terminal. Set `NO_COLOR` to turn colours off; with `TERM=dumb`, progress is written as one line per transfer.
 
 ### Authentication (`auth`)
 
-Configure credentials and active server connections. The CLI prioritizes `OPENRELIK_SERVER_URL` and `OPENRELIK_API_KEY` environment variables over local configuration settings.
+Configure credentials and active server connections. The server is taken from `--server`, then `OPENRELIK_SERVER_URL`, then the active server. The API key is taken from `OPENRELIK_API_KEY`, then the key saved for that server. There is no flag for the API key, since command lines show up in process lists and shell history.
 
-*   `auth login`: Prompt for server URL and API key, saving them to `~/.openrelik/config.json`.
-*   `auth status`: Show connection status and the active server.
-*   `auth list`: List all configured servers.
-*   `auth switch`: Change the active server.
+*   `auth login [SERVER]`: Check an API key with the server and save it to `~/.openrelik/`. Prompts for anything missing; use `--api-key-stdin` to pipe the key in from a script.
+*   `auth status`: Show which server and API key commands use, and check the login.
+*   `auth list`: List the saved servers.
+*   `auth switch [SERVER]`: Change the active server, by URL or by number from `auth list`.
+*   `auth logout [SERVER]`: Remove a saved server and its API key (the active server by default).
 
 #### Examples
 
@@ -121,9 +143,9 @@ openrelik user me --format json
 
 Organize files in hierarchical directories.
 
-*   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"`; an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
-*   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list`, `upload` and `folder create --parent`. Shows the 30 most recently updated matches by default; use `--limit N` to show more or `--limit 0` for all. `--sort` and `-r` work as in `folder list`. Use `--latest` to show only the most recently updated match, and `--root` to search only root folders (and folders shared with you).
-*   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name; use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes.
+*   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"` (a leading `/`, as `folder search` prints paths, is optional); an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
+*   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list`, `upload` and `folder create --parent`. All matches are shown; use `--limit N` to show only the N most recently updated. `--sort` and `-r` work as in `folder list`. Use `--latest` to show only the most recently updated match, and `--root` to search only root folders (and folders shared with you).
+*   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name like `tree`, so the structure is easy to scan (`folder list` and `folder search` sort by last update like `ls -latr`, so the latest work is shown last); use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes.
 *   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder. Use `--exist-ok` to print an existing folder with the same name in that location instead of creating a duplicate, which makes scripts safe to re-run. If several such folders exist it fails and lists them; add `--latest` to use the most recently updated one.
 
 #### Examples
@@ -155,7 +177,7 @@ openrelik folder tree "Case A/"
 
 Move files between your machine and OpenRelik.
 
-*   `upload <PATH>... [FOLDER]`: Upload files and directories. With more than one argument, the last one is the existing folder to upload into, given as an ID or path (like `cp`). Directories are uploaded recursively (up to `--depth` levels, default 3) and recreated as subfolders. With a single argument, or with `/` as `FOLDER`, a new root folder is created instead: a single directory becomes the root folder itself, and anything else goes into a folder named after the current time (e.g. `Upload 2026-10-27 14:05`). Use `--name` to choose the new folder's name. Files given directly are skipped if `FOLDER` already holds a file with the same name and SHA256, so an interrupted upload can simply be run again; if the server has no hash for a file with the same name and size (files over 5 GB aren't hashed), you are asked whether to upload it, and without a terminal the upload fails instead. Use `--force` to upload without checking.
+*   `upload <PATH>... [FOLDER]`: Upload files and directories. With more than one argument, the last one is the existing folder to upload into, given as an ID or path (like `cp`). Directories are uploaded recursively and recreated as subfolders; use `--depth N` to upload only N levels, and the directories left out are listed. With a single argument, or with `/` as `FOLDER`, a new root folder is created instead: a single directory becomes the root folder itself, and anything else goes into a folder named after the current time in UTC (e.g. `Upload 2026-10-27 14:05 UTC`). Use `--name` to choose the new folder's name. Files given directly are skipped if `FOLDER` already holds a file with the same name and SHA256, so an interrupted upload can simply be run again; if the server has no hash for a file with the same name and size (files over 5 GB aren't hashed), you are asked whether to upload it, and without a terminal the upload fails instead. Use `--force` to upload without checking.
 *   `download <FILE> [DESTINATION]`: Download a file. `FILE` is a file ID or a path of folder names ending in the file name, as for `file cat`. `DESTINATION` may be a file path or an existing directory; by default the file is saved in the current directory under its original name.
 
 #### Examples
@@ -195,7 +217,7 @@ openrelik file cat -c 512 "Case A/evidence/disk.E01" | xxd
 
 Inspect processing workers.
 
-*   `worker list`: List registered workers and update the local cache at `~/.openrelik/workers_cache.json`.
+*   `worker list`: List registered workers, with the `run` subcommand for each, and update the local cache at `~/.openrelik/workers_cache.json`.
 
 #### Example
 
@@ -211,6 +233,7 @@ Manage and execute forensic pipelines.
 *   `workflow create`: Create a workflow. Requires `--file <ID>` and `--template <ID>`. Use `--run` to execute immediately.
 *   `workflow info <ID>`: Display workflow structure and configuration.
 *   `workflow status <ID>`: Show current execution status.
+*   `workflow wait <ID>`: Wait for a workflow to finish and show its status. Exits 1 if it failed; `--timeout 30m` stops waiting after a while.
 *   `workflow run <ID>`: Start a created workflow.
 
 #### Example
@@ -218,16 +241,20 @@ Manage and execute forensic pipelines.
 ```bash
 # Create and start a workflow from file 10 using template 5
 openrelik workflow create --file 10 --template 5 --run
+
+# Wait for workflow 99, then download its results if it succeeded
+openrelik workflow wait 99 && openrelik workflow download 99
 ```
 
 ### Dynamic Worker Execution (`run`)
 
-Run workers on files. The CLI reads the local worker cache to generate subcommands dynamically. Inputs can be server-side file IDs or local paths, which the CLI uploads automatically before running the worker.
+Run workers on files. The CLI generates a subcommand for each worker from the local worker cache, which is updated when a workflow starts, when `run --help` is shown, or with `worker list`. When a workflow finishes, the output files of its final tasks are downloaded: the end of a chain, or each worker run with `--and`. Inputs can be file IDs, paths of files on the server (such as `"Case A/evidence/disk.E01"`, as for `file info`), or local paths, which the CLI uploads automatically before running the worker. A local file isn't uploaded again if the upload folder already holds a file with the same name and SHA256; that file is used instead. An input that isn't a local file and contains a `/` is a server path. If a relative path names both a local file and a file on the server, `run` fails rather than guess: write `./PATH` for the local file, or use the file ID.
 
 *   `run <worker_name> <input>`: Run a specific worker on an input.
 *   Use `--then` to chain workers sequentially (passing output from one to the next).
 *   Use `--and` to run workers in parallel.
 *   Use `--dry-run` to output the generated JSON workflow specification without executing it.
+*   Use `--download final|all|none` to choose which results are downloaded (default `final`), and `--download-result` or `--no-download-result` after a worker to override that for the worker's task. `--no-download` was removed; use `--download none`.
 
 #### Examples
 
@@ -237,6 +264,9 @@ openrelik run strings 100
 
 # Run strings on a local file (uploads automatically)
 openrelik run strings suspicious.exe
+
+# Run strings on a file on the server, by path
+openrelik run strings "Case A/evidence/disk.E01"
 
 # Chain strings to grep
 openrelik run strings --then grep --regex "password" 100

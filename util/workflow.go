@@ -16,6 +16,7 @@ package util
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -96,6 +97,19 @@ type WorkflowMonitor struct {
 	taskStatusDisplay map[string]string
 	mu                sync.Mutex
 }
+
+// WorkflowFailedError is returned by WorkflowMonitor.Monitor when the
+// workflow finished with a failure.
+type WorkflowFailedError struct {
+	ID int
+}
+
+func (e *WorkflowFailedError) Error() string {
+	return fmt.Sprintf("workflow %d failed", e.ID)
+}
+
+// StatusPollInterval is how often a WorkflowMonitor asks for the status.
+var StatusPollInterval = 2 * time.Second
 
 // NewWorkflowMonitor creates a new WorkflowMonitor.
 func NewWorkflowMonitor(client *openrelik.Client, workflow *openrelik.Workflow, taskShortNames []string, taskUUIDs []string, uuidToShort map[string]string, interactive bool, showProgress bool) *WorkflowMonitor {
@@ -203,7 +217,13 @@ func (m *WorkflowMonitor) monitorInteractive(ctx context.Context) (*openrelik.Wo
 		if done {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			close(stopUI)
+			<-uiDone
+			return lastStatus, ctx.Err()
+		case <-time.After(StatusPollInterval):
+		}
 	}
 
 	close(stopUI)
@@ -223,7 +243,7 @@ func (m *WorkflowMonitor) monitorInteractive(ctx context.Context) (*openrelik.Wo
 	}
 
 	if workflowFailed {
-		return lastStatus, fmt.Errorf("workflow %d failed", m.workflow.ID)
+		return lastStatus, &WorkflowFailedError{ID: m.workflow.ID}
 	}
 
 	return lastStatus, nil
@@ -294,11 +314,15 @@ func (m *WorkflowMonitor) monitorNonInteractive(ctx context.Context) (*openrelik
 		done := IsTerminalTaskStatus(status.Status)
 		if done {
 			if strings.EqualFold(status.Status, "FAILURE") {
-				return lastStatus, fmt.Errorf("workflow %d failed", m.workflow.ID)
+				return lastStatus, &WorkflowFailedError{ID: m.workflow.ID}
 			}
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return lastStatus, ctx.Err()
+		case <-time.After(StatusPollInterval):
+		}
 	}
 	return lastStatus, nil
 }
@@ -315,6 +339,7 @@ type WorkflowMonitorMeta struct {
 	TaskFolders      bool
 	UploadFolderID   int
 	UploadFolderName string
+	DryRun           bool
 }
 
 // BuildWorkflowSpec constructs a workflow specification from command segments.
@@ -340,13 +365,11 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 	// Initialize with defaults from runCmd
 	if runCmd != nil {
 		meta.DownloadPolicy, _ = runCmd.Flags().GetString("download")
-		if noDownload, _ := runCmd.Flags().GetBool("no-download"); noDownload {
-			meta.DownloadPolicy = "none"
-		}
 		meta.OutputDir, _ = runCmd.Flags().GetString("output-dir")
 		meta.TaskFolders, _ = runCmd.Flags().GetBool("task-folders")
 		meta.UploadFolderID, _ = runCmd.Flags().GetInt("upload-folder-id")
 		meta.UploadFolderName, _ = runCmd.Flags().GetString("upload-folder-name")
+		meta.DryRun, _ = runCmd.Flags().GetBool("dry-run")
 	}
 
 	for _, segment := range segments {
@@ -367,6 +390,7 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 
 		if runCmd != nil {
 			tempCmd.PersistentFlags().AddFlagSet(runCmd.PersistentFlags())
+			tempCmd.PersistentFlags().AddFlagSet(runCmd.InheritedFlags())
 		}
 
 		tempCmd.SetArgs(segment[1:])
@@ -382,9 +406,6 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 		if tempCmd.Flags().Changed("download") {
 			meta.DownloadPolicy, _ = tempCmd.Flags().GetString("download")
 		}
-		if noDownload, _ := tempCmd.Flags().GetBool("no-download"); noDownload {
-			meta.DownloadPolicy = "none"
-		}
 		if tempCmd.Flags().Changed("output-dir") {
 			meta.OutputDir, _ = tempCmd.Flags().GetString("output-dir")
 		}
@@ -396,6 +417,9 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 		}
 		if tempCmd.Flags().Changed("upload-folder-name") {
 			meta.UploadFolderName, _ = tempCmd.Flags().GetString("upload-folder-name")
+		}
+		if dryRun, _ := tempCmd.Flags().GetBool("dry-run"); dryRun {
+			meta.DryRun = true
 		}
 
 		positionalArgs = append(positionalArgs, tempCmd.Flags().Args()...)
@@ -459,19 +483,59 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 	return spec, positionalArgs, taskDownloadPrefs, meta, nil
 }
 
-// FindWorker identifies a worker by name or task name.
+// WorkerCommand returns the name of a worker's 'run' subcommand: the last
+// part of its task name, e.g. "strings" for
+// "openrelik-worker-strings.tasks.strings".
+func WorkerCommand(w openrelik.Worker) string {
+	return w.TaskName[strings.LastIndex(w.TaskName, ".")+1:]
+}
+
+// FindWorker identifies a worker by command name or task name.
 func FindWorker(name string, workers []openrelik.Worker) *openrelik.Worker {
 	for _, w := range workers {
-		use := w.TaskName
-		parts := strings.Split(w.TaskName, ".")
-		if len(parts) > 0 {
-			use = parts[len(parts)-1]
-		}
-		if use == name || w.TaskName == name {
+		if WorkerCommand(w) == name || w.TaskName == name {
 			return &w
 		}
 	}
 	return nil
+}
+
+// ErrFinalTasksUnknown is returned when a workflow's final tasks can't be
+// worked out from its spec.
+var ErrFinalTasksUnknown = errors.New("can't tell which tasks of the workflow are final")
+
+// FinalTasks returns the UUIDs of the tasks that have no tasks after them in
+// the workflow spec: the end of a chain, and every one of the tasks run in
+// parallel at the end of a workflow. The server lists a workflow's tasks
+// without their order, so the spec is the only record of it.
+func FinalTasks(specJSON *string, tasks []openrelik.Task) (map[string]bool, error) {
+	if specJSON == nil || *specJSON == "" {
+		return nil, fmt.Errorf("%w: it has no spec", ErrFinalTasksUnknown)
+	}
+	var spec WorkflowSpec
+	if err := json.Unmarshal([]byte(*specJSON), &spec); err != nil {
+		return nil, fmt.Errorf("%w: its spec can't be read: %v", ErrFinalTasksUnknown, err)
+	}
+	inWorkflow := map[string]bool{}
+	for _, t := range tasks {
+		inWorkflow[t.UUID] = true
+	}
+	final := map[string]bool{}
+	var walk func([]WorkflowTask)
+	walk = func(nodes []WorkflowTask) {
+		for _, n := range nodes {
+			if len(n.Tasks) > 0 {
+				walk(n.Tasks)
+			} else if inWorkflow[n.UUID] {
+				final[n.UUID] = true
+			}
+		}
+	}
+	walk(spec.Workflow.Tasks)
+	if len(final) == 0 {
+		return nil, fmt.Errorf("%w: none of its tasks match the end of its spec", ErrFinalTasksUnknown)
+	}
+	return final, nil
 }
 
 // FlattenTasks recursively flattens a tree of tasks into a linear slice.
@@ -484,4 +548,30 @@ func FlattenTasks(tasks []openrelik.Task) []openrelik.Task {
 		}
 	}
 	return flattened
+}
+
+// TaskSettings returns the configuration of each task in a workflow spec,
+// keyed by task UUID, which is also the UUID of the task the server runs.
+// Tasks without configuration are left out. A spec that can't be parsed
+// gives no settings.
+func TaskSettings(specJSON *string) map[string][]WorkflowTaskConfig {
+	settings := map[string][]WorkflowTaskConfig{}
+	if specJSON == nil {
+		return settings
+	}
+	var spec WorkflowSpec
+	if err := json.Unmarshal([]byte(*specJSON), &spec); err != nil {
+		return settings
+	}
+	var walk func(tasks []WorkflowTask)
+	walk = func(tasks []WorkflowTask) {
+		for _, t := range tasks {
+			if len(t.TaskConfig) > 0 {
+				settings[t.UUID] = t.TaskConfig
+			}
+			walk(t.Tasks)
+		}
+	}
+	walk(spec.Workflow.Tasks)
+	return settings
 }

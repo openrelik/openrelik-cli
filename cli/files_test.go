@@ -12,8 +12,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/openrelik/openrelik-cli/config"
+	"github.com/openrelik/openrelik-cli/util"
+	openrelik "github.com/openrelik/openrelik-go-client"
 )
 
 // newCatServer serves the download and info endpoints for the files in
@@ -192,8 +195,8 @@ func TestFileCatErrors(t *testing.T) {
 		wantStdout   string
 		wantRequests bool
 	}{
-		{name: "not found on second ID", args: []string{"1", "404"}, wantErr: "file 404:", wantStdout: catText, wantRequests: true},
-		{name: "numbered output flushed before error", args: []string{"-n", "1", "404"}, wantErr: "file 404:", wantStdout: "     1\thello\n     2\tworld\n", wantRequests: true},
+		{name: "not found on second ID", args: []string{"1", "404"}, wantErr: "file 404 not found", wantStdout: catText, wantRequests: true},
+		{name: "numbered output flushed before error", args: []string{"-n", "1", "404"}, wantErr: "file 404 not found", wantStdout: "     1\thello\n     2\tworld\n", wantRequests: true},
 		{name: "server error on second ID", args: []string{"1", "500"}, wantErr: "file 500:", wantStdout: catText, wantRequests: true},
 		{name: "name without folder", args: []string{"1", "abc"}, wantErr: `invalid file "abc": give a file ID or a path`},
 		{name: "folder path", args: []string{"Case A/evidence/"}, wantErr: "names a folder"},
@@ -393,4 +396,72 @@ func TestFileInfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFileInfoView(t *testing.T) {
+	created := time.Date(2026, 10, 1, 8, 0, 0, 0, time.FixedZone("CET", 3600))
+	updated := created.Add(90 * time.Second)
+	str := func(s string) *string { return &s }
+
+	t.Run("all fields", func(t *testing.T) {
+		v := &FileInfoView{&openrelik.File{
+			ID: 4121, DisplayName: "disk.E01", OriginalPath: str("/mnt/evidence/disk.E01"),
+			Description: str("Laptop image"), Folder: openrelik.Folder{ID: 42, DisplayName: "Case A"},
+			User: openrelik.User{Username: "analyst"}, Filesize: 11366,
+			DataType: "file:generic", MagicMime: "application/octet-stream", MagicText: "EWF/Expert Witness/EnCase image file format",
+			HashMD5: "md5hash", HashSHA1: "sha1hash", HashSHA256: "sha256hash", HashSSDeep: str("3:ssdeep"),
+			CreatedAt: created, UpdatedAt: updated,
+		}}
+		var b strings.Builder
+		if err := v.RenderHuman(&b); err != nil {
+			t.Fatal(err)
+		}
+		age := util.FormatTimeAgo(created)
+		want := `ID             4121
+Name           disk.E01
+Original path  /mnt/evidence/disk.E01
+Description    Laptop image
+Folder         42 (Case A)
+Owner          analyst
+Size           11.1KB (11366 bytes)
+Type           file:generic
+MIME           application/octet-stream
+Magic          EWF/Expert Witness/EnCase image file format
+MD5            md5hash
+SHA1           sha1hash
+SHA256         sha256hash
+SSDeep         3:ssdeep
+Created        2026-10-01T07:00:00Z (` + age + `)
+Updated        2026-10-01T07:01:30Z (` + age + `)
+`
+		if b.String() != want {
+			t.Errorf("output:\n%s\nwant:\n%s", b.String(), want)
+		}
+	})
+
+	t.Run("missing hashes are shown as missing", func(t *testing.T) {
+		v := &FileInfoView{&openrelik.File{ID: 1, DisplayName: "huge.raw", Filesize: 12, HashSHA256: "sha256hash", CreatedAt: created}}
+		var b strings.Builder
+		v.RenderHuman(&b)
+		for _, want := range []string{"Size     12 bytes\n", "MD5      not computed\n", "SHA256   sha256hash\n", "SSDeep   not computed\n", "Updated  -\n"} {
+			if !strings.Contains(b.String(), want) {
+				t.Errorf("expected output to contain %q\n%s", want, b.String())
+			}
+		}
+		for _, absent := range []string{"Original path", "Folder", "Owner", "Magic", "Deleted"} {
+			if strings.Contains(b.String(), absent) {
+				t.Errorf("expected no %q line for a field that isn't set\n%s", absent, b.String())
+			}
+		}
+	})
+
+	t.Run("deleted", func(t *testing.T) {
+		deleted := true
+		v := &FileInfoView{&openrelik.File{ID: 1, IsDeleted: &deleted, DeletedAt: &updated}}
+		var b strings.Builder
+		v.RenderHuman(&b)
+		if !strings.Contains(b.String(), "Deleted  yes, 2026-10-01T07:01:30Z (") {
+			t.Errorf("expected the deletion time\n%s", b.String())
+		}
+	})
 }

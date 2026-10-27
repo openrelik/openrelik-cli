@@ -98,3 +98,45 @@ func TestMeCmdJSON(t *testing.T) {
 		t.Errorf("output does not look like JSON: %q", output)
 	}
 }
+
+// TestMeCmdAdminFalse checks that an explicit "is_admin": false is shown,
+// and that nothing is shown when the server doesn't say.
+func TestMeCmdAdminFalse(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, wantHuman, wantJSON string
+	}{
+		{name: "explicit false", body: `{"id": 1, "username": "u", "is_admin": false}`, wantHuman: "Admin", wantJSON: `"is_admin": false`},
+		{name: "not sent", body: `{"id": 1, "username": "u"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprintln(w, tt.body)
+			}))
+			defer server.Close()
+			t.Setenv("OPENRELIK_API_KEY", "test-key")
+			t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+			for _, format := range []string{"human", "json"} {
+				root := NewRootCmd()
+				buf := new(bytes.Buffer)
+				root.SetOut(buf)
+				root.SetErr(buf)
+				root.SetArgs([]string{"--format", format, "user", "me"})
+				if err := root.Execute(); err != nil {
+					t.Fatal(err)
+				}
+				want, key := tt.wantHuman, "Admin"
+				if format == "json" {
+					want, key = tt.wantJSON, "is_admin"
+				}
+				if want == "" && strings.Contains(buf.String(), key) {
+					t.Errorf("%s output shows %s the server didn't send:\n%s", format, key, buf)
+				}
+				if want != "" && !strings.Contains(buf.String(), want) {
+					t.Errorf("%s output lacks %q:\n%s", format, want, buf)
+				}
+			}
+		})
+	}
+}

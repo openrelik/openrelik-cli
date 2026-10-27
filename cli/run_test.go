@@ -16,9 +16,17 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
@@ -65,7 +73,7 @@ func TestDynamicWorkerCommands(t *testing.T) {
 		},
 	}
 
-	if err := config.SaveWorkersCache(testWorkers); err != nil {
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
 		t.Fatalf("Failed to save workers cache: %v", err)
 	}
 
@@ -113,7 +121,7 @@ func TestRunCmdOutputDirValidation(t *testing.T) {
 	testWorkers := []openrelik.Worker{
 		{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"},
 	}
-	if err := config.SaveWorkersCache(testWorkers); err != nil {
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
 		t.Fatalf("Failed to save workers cache: %v", err)
 	}
 
@@ -216,5 +224,466 @@ func TestSliceArgs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunFailedWorkflow checks that 'run' exits with an error when the
+// workflow fails, after downloading the results that were produced.
+func TestRunFailedWorkflow(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	testWorkers := []openrelik.Worker{
+		{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"},
+	}
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
+		t.Fatalf("Failed to save workers cache: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch path := r.URL.Path; {
+		case strings.HasSuffix(path, "/workflows/") || strings.HasSuffix(path, "/run/"):
+			fmt.Fprint(w, `{"id": 100, "folder": {"id": 1}}`)
+		case strings.HasSuffix(path, "/status/"):
+			fmt.Fprint(w, `{"status": "FAILURE", "tasks": [{"uuid": "t1", "display_name": "Strings", "status_short": "FAILURE"}]}`)
+		case path == "/api/v1/workflows/100":
+			fmt.Fprint(w, `{"id": 100, "spec_json": "{\"workflow\": {\"tasks\": [{\"uuid\": \"t1\", \"tasks\": []}]}}",
+				"tasks": [{"uuid": "t1", "id": 1, "display_name": "Strings",
+				"output_files": [{"id": 10, "display_name": "partial.txt"}]}]}`)
+		case path == "/api/v1/files/123":
+			fmt.Fprint(w, `{"id": 123, "display_name": "input.bin", "folder": {"id": 1}}`)
+		case path == "/api/v1/files/10":
+			fmt.Fprint(w, `{"id": 10, "display_name": "partial.txt", "filesize": 7}`)
+		case path == "/api/v1/files/10/download":
+			fmt.Fprint(w, "partial")
+		default:
+			t.Logf("unhandled %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	if err := config.SaveWorkersCache(server.URL, testWorkers); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+	root := NewRootCmd()
+	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs([]string{"run", "-o", outDir, "strings", "123"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "workflow 100 failed") {
+		t.Fatalf("expected error containing %q, got %v", "workflow 100 failed", err)
+	}
+	if code := exitCode(err); code != exitError {
+		t.Errorf("exit code %d for a failed workflow, want %d", code, exitError)
+	}
+	if got, _ := os.ReadFile(filepath.Join(outDir, "partial.txt")); string(got) != "partial" {
+		t.Errorf("expected the results to be downloaded, got %q", got)
+	}
+
+	// The workflow ID is shown when it starts, and the outcome and saved
+	// files are printed as the result.
+	if !strings.Contains(stderr.String(), "Workflow 100 started in folder 1\n") {
+		t.Errorf("expected the workflow ID on stderr, got %q", stderr.String())
+	}
+	wantOut := fmt.Sprintf("Workflow 100 finished: FAILURE (folder 1)\nFile 10 saved to %q\n  SHA256 ", filepath.Join(outDir, "partial.txt"))
+	if !strings.HasPrefix(stdout.String(), wantOut) {
+		t.Errorf("stdout = %q, want it to start with %q", stdout.String(), wantOut)
+	}
+}
+
+func TestRunDryRunAndSegmentFlags(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+
+	testWorkers := []openrelik.Worker{
+		{
+			TaskName:    "openrelik-worker-strings.tasks.strings",
+			DisplayName: "Strings",
+			Description: "Extract strings from files",
+		},
+		{
+			TaskName:    "openrelik-worker-grep.tasks.grep",
+			DisplayName: "Grep",
+			Description: "Search for patterns in files",
+			TaskConfig: []openrelik.TaskConfig{
+				{Name: "regex", Type: "string"},
+			},
+		},
+	}
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
+		t.Fatalf("Failed to save workers cache: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		args           []string
+		wantQuiet      bool
+		wantStderrText string
+	}{
+		{
+			name:           "dry-run before worker",
+			args:           []string{"run", "--dry-run", "strings", "123"},
+			wantStderrText: "Dry run: generating workflow spec...",
+		},
+		{
+			name:           "dry-run after worker before input",
+			args:           []string{"run", "strings", "--dry-run", "123"},
+			wantStderrText: "Dry run: generating workflow spec...",
+		},
+		{
+			name:           "dry-run after input",
+			args:           []string{"run", "strings", "123", "--dry-run"},
+			wantStderrText: "Dry run: generating workflow spec...",
+		},
+		{
+			name:           "chained workers with dry-run at end",
+			args:           []string{"run", "strings", "--then", "grep", "--regex", "password", "100", "--dry-run"},
+			wantStderrText: "Inputs: [100]",
+		},
+		{
+			name:      "quiet flag after worker suppresses output",
+			args:      []string{"run", "strings", "123", "--dry-run", "-q"},
+			wantQuiet: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outputFormat = "human"
+			quiet = false
+			defer func() {
+				outputFormat = "human"
+				quiet = false
+			}()
+
+			root := NewRootCmd()
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(tt.args)
+
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+
+			if tt.wantQuiet {
+				if stdout.Len() != 0 || stderr.Len() != 0 {
+					t.Errorf("expected empty stdout/stderr with -q, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+				}
+				return
+			}
+
+			var spec util.WorkflowSpec
+			if err := json.Unmarshal(stdout.Bytes(), &spec); err != nil {
+				t.Fatalf("stdout is not valid JSON: %v\nstdout:\n%s", err, stdout.String())
+			}
+			if len(spec.Workflow.Tasks) == 0 {
+				t.Errorf("expected at least one task in workflow spec, got 0")
+			}
+			if !strings.Contains(stderr.String(), tt.wantStderrText) {
+				t.Errorf("expected stderr to contain %q, got %q", tt.wantStderrText, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunWorkerHelp(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+
+	testWorkers := []openrelik.Worker{
+		{
+			TaskName:    "openrelik-worker-strings.tasks.strings",
+			DisplayName: "Strings",
+			Description: "Extract strings from files",
+			TaskConfig: []openrelik.TaskConfig{
+				{Name: "min-len", Description: "Minimum string length", Type: "integer", Default: float64(4)},
+			},
+		},
+		{
+			TaskName:    "openrelik-worker-grep.tasks.grep",
+			DisplayName: "Grep",
+			Description: "Search for patterns in files",
+			TaskConfig: []openrelik.TaskConfig{
+				{Name: "regex", Description: "Regex pattern", Type: "string"},
+			},
+		},
+	}
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
+		t.Fatalf("Failed to save workers cache: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		args         []string
+		wantContains []string
+	}{
+		{
+			name: "single worker help",
+			args: []string{"run", "strings", "--help"},
+			wantContains: []string{
+				"openrelik run strings <INPUT>... [flags]",
+				"--min-len",
+				"--then",
+				"--and",
+				"--output-dir",
+				"--dry-run",
+			},
+		},
+		{
+			name: "chained worker help shows last segment with help",
+			args: []string{"run", "strings", "--then", "grep", "--help"},
+			wantContains: []string{
+				"openrelik run grep <INPUT>... [flags]",
+				"--regex",
+				"--then",
+				"--output-dir",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := NewRootCmd()
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(tt.args)
+
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+
+			out := stdout.String()
+			for _, want := range tt.wantContains {
+				if !strings.Contains(out, want) {
+					t.Errorf("expected help output to contain %q, got:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestRunAmbiguousInput checks that a number that is also a local file name
+// is rejected before anything is created, even with --dry-run.
+func TestRunAmbiguousInput(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	if err := config.SaveWorkersCache("", []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Any request would mean something was created.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	t.Chdir(t.TempDir())
+	os.WriteFile("123", []byte("local evidence"), 0o644)
+
+	for _, args := range [][]string{{"run", "strings", "123"}, {"run", "--dry-run", "strings", "123"}} {
+		root := NewRootCmd()
+		stdout := new(bytes.Buffer)
+		root.SetOut(stdout)
+		root.SetErr(new(bytes.Buffer))
+		root.SetArgs(args)
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), `"123" is both a file ID and a local file`) {
+			t.Errorf("%v: expected an ambiguity error, got %v", args, err)
+		}
+		if stdout.Len() > 0 {
+			t.Errorf("%v: expected no output, got %q", args, stdout.String())
+		}
+	}
+}
+
+// TestRunWorkersLoadedLazily checks that the worker list is only fetched
+// when 'run' needs it, and is fetched again for another server.
+func TestRunWorkersLoadedLazily(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	var requests int
+	registered := `[]`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/v1/taskqueue/tasks/registered" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprint(w, registered)
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	// A stale cache from another server.
+	if err := config.SaveWorkersCache("http://other.example", []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) (string, error) {
+		root := NewRootCmd()
+		out := new(bytes.Buffer)
+		root.SetOut(out)
+		root.SetErr(out)
+		root.SetArgs(args)
+		err := root.Execute()
+		return out.String(), err
+	}
+
+	if _, err := run("auth", "list"); err != nil || requests != 0 {
+		t.Fatalf("auth list made %d requests, err %v", requests, err)
+	}
+	// A dry run works offline from the cache.
+	if _, err := run("run", "--dry-run", "strings", "123"); err != nil || requests != 0 {
+		t.Fatalf("dry run made %d requests, err %v", requests, err)
+	}
+	// Help lists the workers of the server in use.
+	registered = `[{"task_name": "openrelik-worker-grep.tasks.grep", "display_name": "Grep"}]`
+	out, err := run("run", "--help")
+	if err != nil || requests != 1 || !strings.Contains(out, "Grep") || strings.Contains(out, "Strings") {
+		t.Fatalf("run --help made %d requests, err %v:\n%s", requests, err, out)
+	}
+	// The cache is now for this server, so help doesn't ask again.
+	if _, err := run("run", "--help"); err != nil || requests != 1 {
+		t.Fatalf("second run --help made %d requests, err %v", requests, err)
+	}
+	// A worker registered since the cache was saved.
+	registered = `[{"task_name": "openrelik-worker-yara.tasks.yara", "display_name": "Yara"}]`
+	if _, err := run("run", "yara", "123"); err == nil || !strings.Contains(err.Error(), `"yara" was registered since the list of workers was last updated; run the command again`) {
+		t.Errorf("expected a new-worker error, got %v", err)
+	}
+	if _, err := run("run", "bogus", "123"); err == nil || !strings.Contains(err.Error(), `unknown worker "bogus" (see 'openrelik worker list')`) {
+		t.Errorf("expected an unknown-worker error, got %v", err)
+	}
+}
+
+// TestRunInterrupted checks that an interrupted 'run' stops waiting, doesn't
+// download anything, and says how to follow the workflow.
+func TestRunInterrupted(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch path := r.URL.Path; {
+		case strings.HasSuffix(path, "/workflows/") || strings.HasSuffix(path, "/run/"):
+			fmt.Fprint(w, `{"id": 100, "folder": {"id": 1}}`)
+		case strings.HasSuffix(path, "/status/"):
+			cancel() // Ctrl-C while the workflow runs
+			fmt.Fprint(w, `{"status": "RUNNING", "tasks": [{"uuid": "t1", "display_name": "Strings", "status_short": "STARTED"}]}`)
+		case path == "/api/v1/files/123":
+			fmt.Fprint(w, `{"id": 123, "display_name": "input.bin", "folder": {"id": 1}}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	if err := config.SaveWorkersCache(server.URL, []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := t.TempDir()
+	root := NewRootCmd()
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"run", "-o", outDir, "strings", "123"})
+	done := make(chan error, 1)
+	go func() { done <- root.ExecuteContext(ctx) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "interrupted; workflow 100 keeps running on the server") || !strings.Contains(err.Error(), "openrelik workflow download 100") {
+			t.Errorf("expected an interrupted error, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run kept waiting after it was interrupted")
+	}
+	if entries, _ := os.ReadDir(outDir); len(entries) > 0 {
+		t.Errorf("expected nothing downloaded, found %d entries", len(entries))
+	}
+}
+
+func TestRunServerPathInput(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	testWorkers := []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}
+	if err := config.SaveWorkersCache("", testWorkers); err != nil {
+		t.Fatal(err)
+	}
+
+	var created string // the body of the request creating the workflow
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch path := r.URL.Path; {
+		case path == "/api/v1/folders/all/":
+			fmt.Fprint(w, `{"folders": [{"id": 7, "display_name": "Case A"}]}`)
+		case path == "/api/v1/folders/7/files/":
+			fmt.Fprint(w, `[{"id": 812, "display_name": "disk.E01"}]`)
+		case strings.HasSuffix(path, "/workflows/"):
+			body, _ := io.ReadAll(r.Body)
+			created = string(body)
+			fmt.Fprint(w, `{"id": 100, "folder": {"id": 1}}`)
+		case strings.HasSuffix(path, "/run/"):
+			fmt.Fprint(w, `{"id": 100, "folder": {"id": 1}}`)
+		case strings.HasSuffix(path, "/status/"):
+			fmt.Fprint(w, `{"status": "SUCCESS", "tasks": [{"uuid": "t1", "display_name": "Strings", "status_short": "SUCCESS"}]}`)
+		case path == "/api/v1/workflows/100":
+			fmt.Fprint(w, `{"id": 100, "tasks": [{"uuid": "t1", "id": 1, "display_name": "Strings"}]}`)
+		case path == "/api/v1/files/5", path == "/api/v1/files/812":
+			fmt.Fprint(w, `{"id": 5, "folder": {"id": 1}}`)
+		default:
+			t.Logf("unhandled %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	if err := config.SaveWorkersCache(server.URL, testWorkers); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+
+	run := func(args ...string) (string, error) {
+		root := NewRootCmd()
+		stdout := new(bytes.Buffer)
+		root.SetOut(stdout)
+		root.SetErr(new(bytes.Buffer))
+		root.SetArgs(args)
+		err := root.Execute()
+		return stdout.String(), err
+	}
+
+	if _, err := run("run", "--download", "none", "strings", "5", "Case A/disk.E01"); err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if !strings.Contains(created, `[5,812]`) {
+		t.Errorf("expected the workflow to get files [5,812], got request %s", created)
+	}
+
+	_, err := run("run", "--download", "none", "strings", "Case A/typo.E01")
+	want := `"Case A/typo.E01" is neither a local file nor a file on the server: no file named "typo.E01" in Case A/`
+	if err == nil || err.Error() != want {
+		t.Errorf("error = %v, want %q", err, want)
+	}
+	if code := exitCode(err); code != exitNotFound {
+		t.Errorf("exit code %d, want %d", code, exitNotFound)
+	}
+
+	// A dry run doesn't contact the server.
+	server.Close()
+	out, err := run("run", "--dry-run", "strings", "Case A/disk.E01")
+	if err != nil || !strings.Contains(out, `"workflow"`) {
+		t.Errorf("dry run: %v\n%s", err, out)
 	}
 }

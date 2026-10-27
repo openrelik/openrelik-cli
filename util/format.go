@@ -165,7 +165,7 @@ func FprintPropertyView(w io.Writer, s interface{}) {
 			if tVal.IsZero() {
 				continue
 			}
-			val = tVal.Format(time.RFC3339) // ISO8601
+			val = FormatTime(tVal)
 		} else if label == "Size" && value.Kind() == reflect.Int64 {
 			val = FormatBytes(value.Int())
 		} else if value.Kind() == reflect.Ptr {
@@ -312,7 +312,7 @@ func FprintTable(w io.Writer, s interface{}) {
 			var str string
 
 			if fieldVal.Type() == reflect.TypeOf(time.Time{}) {
-				str = FormatTimeAgo(fieldVal.Interface().(time.Time))
+				str = FormatTime(fieldVal.Interface().(time.Time))
 			} else if headers[j] == "SIZE" && fieldVal.Kind() == reflect.Int64 {
 				str = FormatBytes(fieldVal.Int())
 			} else if fieldVal.Kind() == reflect.Ptr {
@@ -368,6 +368,26 @@ func ParseBytes(s string) (int64, error) {
 		return 0, fmt.Errorf("invalid byte count %q (use a number such as 512, 4K, 10M, 1G or 2T)", s)
 	}
 	return n * mult, nil
+}
+
+// FormatTime formats t as an exact timestamp in UTC, in ISO 8601 (RFC 3339)
+// format, such as "2026-10-27T19:20:57Z". Exact UTC times can be compared
+// and pasted into case notes and timelines, unlike relative ones. A zero
+// time gives "-".
+func FormatTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// FormatTimeWithAge formats t like FormatTime, followed by how long ago it
+// was, such as "2026-10-27T19:20:57Z (about 2 hours ago)".
+func FormatTimeWithAge(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return FormatTime(t) + " (" + FormatTimeAgo(t) + ")"
 }
 
 // FormatTimeAgo formats a time.Time into a relative string like "about 15 days ago".

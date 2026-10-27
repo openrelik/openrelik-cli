@@ -15,11 +15,14 @@
 package cli
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-go-client"
 )
 
@@ -113,5 +116,54 @@ func TestGenerateSkillFile(t *testing.T) {
 	}
 	if !strings.Contains(content, "run strings") {
 		t.Errorf("expected content to contain 'run strings'")
+	}
+}
+
+func TestSkillInstallConfirmation(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	if err := config.SaveWorkersCache("", []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		args        []string
+		terminal    bool
+		input       string
+		wantErr     string
+		wantInstall bool
+	}{
+		{name: "no terminal", wantErr: "No terminal to ask on; use --yes to confirm."},
+		{name: "no terminal with --yes", args: []string{"--yes"}, wantInstall: true},
+		{name: "terminal, confirmed", terminal: true, input: "y\n", wantInstall: true},
+		{name: "terminal, declined", terminal: true, input: "n\n", wantErr: "cancelled; the skill was not installed"},
+		{name: "unknown harness with a directory", args: []string{"--yes", "--harness", "foo"}, wantErr: "unknown harness: foo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := stdinIsTerminal
+			stdinIsTerminal = func(io.Reader) bool { return tt.terminal }
+			defer func() { stdinIsTerminal = orig }()
+
+			dir := t.TempDir()
+			root := NewRootCmd()
+			root.SetOut(new(bytes.Buffer))
+			root.SetErr(new(bytes.Buffer))
+			root.SetIn(strings.NewReader(tt.input))
+			root.SetArgs(append([]string{"skill", "install", dir}, tt.args...))
+			err := root.Execute()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			_, statErr := os.Stat(filepath.Join(dir, "openrelik", "SKILL.md"))
+			if installed := statErr == nil; installed != tt.wantInstall {
+				t.Errorf("installed = %v, want %v", installed, tt.wantInstall)
+			}
+		})
 	}
 }

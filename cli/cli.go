@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/openrelik/openrelik-cli/config"
 	"github.com/openrelik/openrelik-cli/util"
@@ -13,10 +17,27 @@ import (
 
 var (
 	serverURL    string
-	apiKey       string
 	outputFormat string
 	quiet        bool
+	debug        bool
 )
+
+// outputFormats are the values --format accepts.
+var outputFormats = []string{"human", "json", "verbose"}
+
+// formatValue is the --format flag. It rejects unknown formats while the
+// flags are parsed, so a typo fails before any request is made.
+type formatValue struct{ p *string }
+
+func (f formatValue) String() string { return *f.p }
+func (f formatValue) Type() string   { return "string" }
+func (f formatValue) Set(s string) error {
+	if !slices.Contains(outputFormats, s) {
+		return fmt.Errorf("must be one of %s", strings.Join(outputFormats, ", "))
+	}
+	*f.p = s
+	return nil
+}
 
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -31,8 +52,11 @@ func NewRootCmd() *cobra.Command {
 
 	cmd.CompletionOptions.DisableDefaultCmd = true
 
-	cmd.PersistentFlags().StringVar(&outputFormat, "format", "human", "Output format (human, json, verbose)")
+	serverURL, outputFormat = "", "human"
+	cmd.PersistentFlags().StringVar(&serverURL, "server", "", "Server URL to use instead of the active one (overrides OPENRELIK_SERVER_URL)")
+	cmd.PersistentFlags().Var(formatValue{&outputFormat}, "format", "Output format ("+strings.Join(outputFormats, ", ")+")")
 	cmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress all output")
+	cmd.PersistentFlags().BoolVar(&debug, "debug", false, "Show errors from the server as they were received")
 
 	cmd.AddCommand(newAuthCmd())
 	cmd.AddCommand(newUserCmd())
@@ -47,6 +71,11 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newSkillCmd())
 
 	requireKnownSubcommands(cmd)
+	markUsageErrors(cmd)
+	friendlyErrors(cmd)
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return &usageError{fmt.Errorf("%w\n\nRun '%s --help' for usage.", err, c.CommandPath())}
+	})
 	return cmd
 }
 
@@ -82,45 +111,66 @@ func unknownSubcommandArgs(cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("%s\n\nRun '%s --help' for usage.", msg, cmd.CommandPath())
 }
 
+// credentials are the server and API key that commands use, and where each
+// came from, for 'auth status'.
+type credentials struct {
+	ServerURL    string
+	ServerSource string // e.g. "OPENRELIK_SERVER_URL"; empty if no server is set
+	APIKey       string
+	APIKeySource string // empty if no key is set
+	// ActiveServer is the active server in the settings file, which an
+	// environment variable or flag may override.
+	ActiveServer string
+}
+
+// resolveCredentials finds the server in order of precedence: the --server
+// flag, OPENRELIK_SERVER_URL, then the active server in the config files.
+// The API key comes from OPENRELIK_API_KEY or, failing that, the key saved
+// for the server, whichever way the server was chosen. There is no flag for
+// the key, since command lines show up in process lists and shell history.
+func resolveCredentials() credentials {
+	var c credentials
+	if settings, _ := config.LoadSettings(); settings != nil {
+		if active := settings.GetActiveServer(); active != nil {
+			c.ActiveServer = active.URL
+		}
+	}
+	switch {
+	case serverURL != "":
+		c.ServerURL, c.ServerSource = strings.TrimRight(serverURL, "/"), "--server"
+	case os.Getenv("OPENRELIK_SERVER_URL") != "":
+		c.ServerURL, c.ServerSource = strings.TrimRight(os.Getenv("OPENRELIK_SERVER_URL"), "/"), "OPENRELIK_SERVER_URL"
+	case c.ActiveServer != "":
+		c.ServerURL = c.ActiveServer
+		c.ServerSource, _ = config.SettingsPath()
+	}
+
+	switch {
+	case os.Getenv("OPENRELIK_API_KEY") != "":
+		c.APIKey, c.APIKeySource = os.Getenv("OPENRELIK_API_KEY"), "OPENRELIK_API_KEY"
+	case c.ServerURL != "":
+		if creds, _ := config.LoadCredentials(); creds != nil && creds.APIKeys[c.ServerURL] != "" {
+			c.APIKey = creds.APIKeys[c.ServerURL]
+			c.APIKeySource, _ = config.CredentialsPath()
+		}
+	}
+	return c
+}
+
 // NewAPIClient can be replaced to customize how the API client is constructed:
 //
 //	cli.NewAPIClient = func() (*openrelik.Client, error) {
 //		return openrelik.NewClient(myURL, myKey, openrelik.WithHTTPClient(myHTTPClient))
 //	}
 var NewAPIClient = func() (*openrelik.Client, error) {
-	s := serverURL
-	if s == "" {
-		s = os.Getenv("OPENRELIK_SERVER_URL")
+	c := resolveCredentials()
+	if c.ServerURL == "" {
+		return nil, &credentialsError{"server URL is required (use --server or the OPENRELIK_SERVER_URL env var, or run 'openrelik auth login')"}
 	}
-	var settings *config.Settings
-	if s == "" {
-		if settings, _ = config.LoadSettings(); settings != nil {
-			if active := settings.GetActiveServer(); active != nil {
-				s = active.URL
-			}
-		}
+	if c.APIKey == "" {
+		return nil, &credentialsError{"API key is required (use OPENRELIK_API_KEY env var, or run 'openrelik auth login')"}
 	}
-
-	k := apiKey
-	if k == "" {
-		k = os.Getenv("OPENRELIK_API_KEY")
-	}
-	if k == "" {
-		if creds, _ := config.LoadCredentials(); creds != nil && s != "" {
-			if val, ok := creds.APIKeys[s]; ok {
-				k = val
-			}
-		}
-	}
-
-	if s == "" {
-		return nil, fmt.Errorf("server URL is required (use OPENRELIK_SERVER_URL env var, or run 'openrelik auth login')")
-	}
-	if k == "" {
-		return nil, fmt.Errorf("API key is required (use OPENRELIK_API_KEY env var, or run 'openrelik auth login')")
-	}
-
-	return openrelik.NewClient(s, k)
+	return openrelik.NewClient(c.ServerURL, c.APIKey)
 }
 
 func newClient() (*openrelik.Client, error) { return NewAPIClient() }
@@ -167,9 +217,31 @@ func printTruncationHint(cmd *cobra.Command, shown, total int, noun, advice stri
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
+//
+// Ctrl-C (or SIGTERM) cancels the commands' context, so they can stop
+// cleanly: downloads remove their temporary files, and 'run' says how to
+// follow the workflow that keeps running on the server. A second Ctrl-C ends
+// the CLI at once. An interrupted command exits with 130, as shells do.
 func Execute() {
-	if err := NewRootCmd().Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop() // restore the default handling for a second signal
+	}()
+
+	err := NewRootCmd().ExecuteContext(ctx)
+	if err == nil {
+		return
 	}
+	if ctx.Err() != nil {
+		if strings.HasPrefix(err.Error(), "interrupted") {
+			fmt.Fprintln(os.Stderr, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Interrupted: %v\n", err)
+		}
+		os.Exit(exitInterrupted)
+	}
+	fmt.Fprintln(os.Stderr, err)
+	os.Exit(exitCode(err))
 }

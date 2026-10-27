@@ -155,7 +155,7 @@ func TestConfig(t *testing.T) {
 	})
 
 	t.Run("WorkersCacheMissing", func(t *testing.T) {
-		_, err := LoadWorkersCache()
+		_, err := LoadWorkersCache("http://a")
 		if !errors.Is(err, ErrCacheMissing) {
 			t.Errorf("expected ErrCacheMissing, got %v", err)
 		}
@@ -163,15 +163,23 @@ func TestConfig(t *testing.T) {
 
 	t.Run("WorkersCacheSaveAndLoad", func(t *testing.T) {
 		workers := []openrelik.Worker{{TaskName: "test-worker"}}
-		if err := SaveWorkersCache(workers); err != nil {
+		if err := SaveWorkersCache("http://a", workers); err != nil {
 			t.Fatalf("SaveWorkersCache failed: %v", err)
 		}
-		loaded, err := LoadWorkersCache()
+		loaded, err := LoadWorkersCache("http://a")
 		if err != nil {
 			t.Fatalf("LoadWorkersCache failed: %v", err)
 		}
 		if len(loaded) != 1 || loaded[0].TaskName != "test-worker" {
 			t.Errorf("unexpected workers: %+v", loaded)
+		}
+		// Another server's workers are stale, but can still be read
+		// without a server.
+		if _, err := LoadWorkersCache("http://b"); !errors.Is(err, ErrCacheStale) {
+			t.Errorf("expected ErrCacheStale for another server, got %v", err)
+		}
+		if cached, err := LoadCachedWorkers(); err != nil || len(cached) != 1 {
+			t.Errorf("LoadCachedWorkers() = %+v, %v", cached, err)
 		}
 	})
 
@@ -179,13 +187,14 @@ func TestConfig(t *testing.T) {
 		dir, _ := EnsureConfigDir()
 		// Write a cache entry with an old timestamp.
 		entry := workersCacheEntry{
+			Server:  "http://a",
 			Workers: []openrelik.Worker{{TaskName: "old-worker"}},
 			SavedAt: time.Now().Add(-2 * time.Hour),
 		}
 		data, _ := json.MarshalIndent(entry, "", "  ")
 		os.WriteFile(filepath.Join(dir, workersCacheFile), data, filePerm)
 
-		_, err := LoadWorkersCache()
+		_, err := LoadWorkersCache("http://a")
 		if !errors.Is(err, ErrCacheStale) {
 			t.Errorf("expected ErrCacheStale, got %v", err)
 		}
@@ -197,7 +206,7 @@ func TestConfig(t *testing.T) {
 		os.Remove(filepath.Join(dir, workersCacheFile))
 
 		refreshed := []openrelik.Worker{{TaskName: "fresh-worker"}}
-		workers, err := LoadOrRefreshWorkersCache(context.Background(), func(_ context.Context) ([]openrelik.Worker, error) {
+		workers, err := LoadOrRefreshWorkersCache(context.Background(), "http://a", func(_ context.Context) ([]openrelik.Worker, error) {
 			return refreshed, nil
 		})
 		if err != nil {
@@ -207,7 +216,7 @@ func TestConfig(t *testing.T) {
 			t.Errorf("unexpected workers: %+v", workers)
 		}
 		// Verify cache was saved.
-		loaded, err := LoadWorkersCache()
+		loaded, err := LoadWorkersCache("http://a")
 		if err != nil {
 			t.Fatalf("cache should be fresh after refresh, got: %v", err)
 		}
@@ -237,4 +246,15 @@ func TestConfig(t *testing.T) {
 			t.Error("expected error writing to read-only dir, got nil")
 		}
 	})
+}
+
+func TestGetActiveServerDoesNotFallBack(t *testing.T) {
+	s := &Settings{Servers: []ServerConfig{{URL: "http://a"}, {URL: "http://b"}}}
+	if got := s.GetActiveServer(); got != nil {
+		t.Errorf("GetActiveServer() with no active server = %+v, want nil", got)
+	}
+	s.ActiveServer = "http://b"
+	if got := s.GetActiveServer(); got == nil || got.URL != "http://b" {
+		t.Errorf("GetActiveServer() = %+v, want http://b", got)
+	}
 }

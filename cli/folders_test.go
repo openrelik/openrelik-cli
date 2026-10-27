@@ -827,13 +827,14 @@ func TestFolderSearch(t *testing.T) {
 		wantQuery string
 	}{
 		{name: "few results", count: 3, args: []string{"match"}, wantRows: []string{"1", "2", "3"}, wantGets: 3, wantQuery: "match"},
+		{name: "default shows all", count: 40, args: []string{"match"}, wantRows: []string{"1", "2"}, wantGets: 40},
 		{
-			name:     "default limit keeps 30 most recent",
+			name:     "limit keeps the most recent",
 			count:    40,
-			args:     []string{"match"},
+			args:     []string{"match", "--limit", "30"},
 			wantRows: []string{"11", "12"}, // first rows; 30 shown in total
 			wantGets: 30,
-			wantHint: "Showing 30 of 40 folders. Use --limit N to see more, or --limit 0 for all.",
+			wantHint: "Showing 30 of 40 folders. Omit --limit to see all.",
 		},
 		{name: "limit 0 shows all across pages", count: 150, args: []string{"match", "--limit", "0"}, wantGets: 150},
 		{name: "reverse", count: 3, args: []string{"match", "-r"}, wantRows: []string{"3", "2", "1"}, wantGets: 3},

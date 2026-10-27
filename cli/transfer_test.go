@@ -89,7 +89,15 @@ func newUploadServer(t *testing.T) *uploadServer {
 				return
 			}
 			s.uploads[name] = r.URL.Query().Get("folder_id")
-			fmt.Fprintf(w, `{"id": 900, "display_name": %q}`, name)
+			// The server hashes what it received; "corrupt.txt" arrives damaged.
+			hash := ""
+			switch name {
+			case "a.txt":
+				hash = aTxtSHA256
+			case "corrupt.txt":
+				hash = "0000"
+			}
+			fmt.Fprintf(w, `{"id": 900, "display_name": %q, "hash_sha256": %q}`, name, hash)
 		case r.URL.Path == "/api/v1/folders/" || strings.HasSuffix(r.URL.Path, "/folders/"):
 			var body struct {
 				DisplayName string `json:"display_name"`
@@ -109,6 +117,9 @@ func newUploadServer(t *testing.T) *uploadServer {
 	}))
 	return s
 }
+
+// aTxtSHA256 is the SHA256 of a.txt as written by writeTree.
+const aTxtSHA256 = "fe599a5727285b6a0318a50aace211016346c5a82c4aed1614bd3dc03026a2c6"
 
 // writeTree creates files (relative paths) with some content under a new
 // temp dir named dirName and returns the dir's path.
@@ -151,6 +162,7 @@ func runUploadWithInput(t *testing.T, server *uploadServer, input string, args .
 
 func TestUpload(t *testing.T) {
 	evidence := writeTree(t, "evidence", "disk.E01", "logs/syslog", "logs/deep/auth.log")
+	deep := writeTree(t, "deep", "1/2/3/4/leaf.txt")
 	loose := writeTree(t, "loose", "a.txt", "b.txt")
 	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
 
@@ -166,7 +178,13 @@ func TestUpload(t *testing.T) {
 			name:        "file into existing folder",
 			args:        []string{a, "42"},
 			wantUploads: map[string]string{"a.txt": "42"},
-			wantOutput:  []string{`File "a.txt" uploaded to folder 42 (ID 900)`},
+			wantOutput:  []string{"File \"a.txt\" uploaded to folder 42 (ID 900)\n  SHA256 " + aTxtSHA256 + " (verified)\n"},
+		},
+		{
+			name:        "file the server hasn't hashed",
+			args:        []string{b, "42"},
+			wantUploads: map[string]string{"b.txt": "42"},
+			wantOutput:  []string{"(not verified: the server has no hash for this file yet)"},
 		},
 		{
 			name:        "files into new timestamped root folder",
@@ -227,6 +245,14 @@ func TestUpload(t *testing.T) {
 			wantRoots:      []string{"evidence"},
 			wantSubfolders: []string{"501/logs"},
 			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502"},
+			wantOutput:     []string{`Not uploaded "` + filepath.Join(evidence, "logs", "deep") + `/": deeper than --depth 1`},
+		},
+		{
+			name:           "all levels are uploaded by default",
+			args:           []string{deep},
+			wantRoots:      []string{"deep"},
+			wantSubfolders: []string{"501/1", "502/2", "503/3", "504/4"},
+			wantUploads:    map[string]string{"leaf.txt": "505"},
 		},
 		{
 			name:           "mixed files and directories into new root folder",
@@ -253,7 +279,7 @@ func TestUpload(t *testing.T) {
 			for i, want := range tt.wantRoots {
 				got := server.roots[i]
 				if want == "Upload *" {
-					if _, err := time.Parse("Upload 2006-01-02 15:04", got); err != nil {
+					if _, err := time.Parse("Upload 2006-01-02 15:04 UTC", got); err != nil {
 						t.Errorf("root folder %q is not a timestamp name: %v", got, err)
 					}
 				} else if got != want {
@@ -281,13 +307,15 @@ func TestUpload(t *testing.T) {
 }
 
 func TestUploadErrors(t *testing.T) {
-	loose := writeTree(t, "loose", "a.txt", "b.txt")
+	loose := writeTree(t, "loose", "a.txt", "b.txt", "corrupt.txt")
 	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
+	corrupt := filepath.Join(loose, "corrupt.txt")
 
 	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
+		name     string
+		args     []string
+		wantErr  string
+		uploaded bool // the error comes after the file reached the server
 	}{
 		{name: "missing path creates nothing", args: []string{a, filepath.Join(loose, "missing"), "/"}, wantErr: "no such file"},
 		{name: "name with existing folder", args: []string{a, "42", "--name", "x"}, wantErr: "--name only applies when creating a new root folder"},
@@ -300,6 +328,7 @@ func TestUploadErrors(t *testing.T) {
 		{name: "no paths", args: []string{}, wantErr: "PATH"},
 		{name: "negative depth", args: []string{a, "--depth", "-1"}, wantErr: "invalid depth: -1"},
 		{name: "zero chunk size", args: []string{a, "--chunk-size", "0"}, wantErr: "invalid chunk size: 0"},
+		{name: "server hash mismatch", args: []string{corrupt, "42"}, uploaded: true, wantErr: "file 900 on the server doesn't match what was uploaded: its SHA256 is 0000"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -309,6 +338,9 @@ func TestUploadErrors(t *testing.T) {
 			_, err := runUpload(t, server, tt.args...)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+			if tt.uploaded {
+				return
 			}
 			if len(server.roots)+len(server.subfolders)+len(server.uploads) > 0 {
 				t.Errorf("nothing should be created on error: roots %q, subfolders %q, uploads %v",
@@ -680,7 +712,8 @@ func TestUploadJSON(t *testing.T) {
 }
 
 func TestDefaultUploadFolderName(t *testing.T) {
-	now := time.Date(2026, 10, 27, 14, 5, 0, 0, time.UTC)
+	// 15:05 in CET is 14:05 UTC.
+	now := time.Date(2026, 10, 27, 15, 5, 0, 0, time.FixedZone("CET", 3600))
 	tests := []struct {
 		paths []string
 		isDir []bool
@@ -688,8 +721,8 @@ func TestDefaultUploadFolderName(t *testing.T) {
 	}{
 		{[]string{"./evidence/"}, []bool{true}, "evidence"},
 		{[]string{"/cases/evidence/logs/.."}, []bool{true}, "evidence"},
-		{[]string{"/cases/disk.E01"}, []bool{false}, "Upload 2026-10-27 14:05"},
-		{[]string{"a", "b"}, []bool{true, true}, "Upload 2026-10-27 14:05"},
+		{[]string{"/cases/disk.E01"}, []bool{false}, "Upload 2026-10-27 14:05 UTC"},
+		{[]string{"a", "b"}, []bool{true, true}, "Upload 2026-10-27 14:05 UTC"},
 	}
 	for _, tt := range tests {
 		if got := defaultUploadFolderName(tt.paths, tt.isDir, now); got != tt.want {
@@ -703,7 +736,7 @@ func TestDownloadCmd(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/files/789" {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintln(w, `{"id": 789, "display_name": "test.txt", "filesize": 13}`)
+			fmt.Fprintf(w, `{"id": 789, "display_name": "test.txt", "filesize": 13, "hash_sha256": %q}`, helloWorldSHA256)
 			return
 		}
 		if r.URL.Path == "/api/v1/files/789/download" {
@@ -754,6 +787,10 @@ func TestDownloadCmd(t *testing.T) {
 		if string(content) != "hello world!!" {
 			t.Errorf("expected 'hello world!!', got %q", string(content))
 		}
+		want := "File 789 saved to \"test.txt\"\n  SHA256 " + helloWorldSHA256 + " (verified)\n"
+		if buf.String() != want {
+			t.Errorf("output = %q, want %q", buf.String(), want)
+		}
 	})
 
 	t.Run("specific directory", func(t *testing.T) {
@@ -795,6 +832,25 @@ func TestDownloadCmd(t *testing.T) {
 		}
 	})
 
+	t.Run("stdout is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		wd, _ := os.Getwd()
+		os.Chdir(dir)
+		defer os.Chdir(wd)
+
+		root := NewRootCmd()
+		root.SetOut(new(bytes.Buffer))
+		root.SetErr(new(bytes.Buffer))
+		root.SetArgs([]string{"download", "789", "-"})
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "use 'openrelik file cat 789' instead") {
+			t.Errorf("expected an error pointing to file cat, got %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "-")); err == nil {
+			t.Error("a file named - was created")
+		}
+	})
+
 	t.Run("non-existent folder", func(t *testing.T) {
 		root := NewRootCmd()
 		buf := new(bytes.Buffer)
@@ -810,6 +866,10 @@ func TestDownloadCmd(t *testing.T) {
 			t.Errorf("expected 'does not exist' error, got %v", err)
 		}
 	})
+
+	orig := stdinIsTerminal
+	stdinIsTerminal = func(io.Reader) bool { return true }
+	defer func() { stdinIsTerminal = orig }()
 
 	t.Run("overwrite confirmation - yes", func(t *testing.T) {
 		tmpFile, _ := os.CreateTemp("", "openrelik-overwrite-*")
@@ -861,6 +921,97 @@ func TestDownloadCmd(t *testing.T) {
 			t.Errorf("expected original content 'old content', got %q", string(content))
 		}
 	})
+
+	t.Run("existing file without a terminal", func(t *testing.T) {
+		stdinIsTerminal = func(io.Reader) bool { return false }
+		defer func() { stdinIsTerminal = func(io.Reader) bool { return true } }()
+		dest := filepath.Join(t.TempDir(), "test.txt")
+		os.WriteFile(dest, []byte("old content"), 0o644)
+
+		root := NewRootCmd()
+		root.SetOut(new(bytes.Buffer))
+		root.SetErr(new(bytes.Buffer))
+		root.SetIn(strings.NewReader("y\n"))
+		root.SetArgs([]string{"download", "789", dest})
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "already exists; use --force to replace it") {
+			t.Fatalf("expected an error asking for --force, got %v", err)
+		}
+		if content, _ := os.ReadFile(dest); string(content) != "old content" {
+			t.Errorf("existing file was changed: %q", content)
+		}
+	})
+
+	t.Run("force replaces without asking", func(t *testing.T) {
+		stdinIsTerminal = func(io.Reader) bool { return false }
+		defer func() { stdinIsTerminal = func(io.Reader) bool { return true } }()
+		dest := filepath.Join(t.TempDir(), "test.txt")
+		os.WriteFile(dest, []byte("old content"), 0o644)
+
+		root := NewRootCmd()
+		root.SetOut(new(bytes.Buffer))
+		root.SetErr(new(bytes.Buffer))
+		root.SetArgs([]string{"download", "789", dest, "--force"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("Execute() failed: %v", err)
+		}
+		if content, _ := os.ReadFile(dest); string(content) != "hello world!!" {
+			t.Errorf("expected the file to be replaced, got %q", content)
+		}
+	})
+}
+
+// helloWorldSHA256 is the SHA256 of "hello world!!".
+const helloWorldSHA256 = "8380c4c6720e0d5ce4789bf72df03a6e1b3ed80891f3adbe8833c760399b8e91"
+
+// TestDownloadHashMismatch checks that a download whose data doesn't match
+// the server's SHA256 leaves nothing behind, and doesn't touch an existing
+// file.
+func TestDownloadHashMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/files/789":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id": 789, "display_name": "test.txt", "filesize": 13, "hash_sha256": "0000"}`)
+		case "/api/v1/files/789/download":
+			fmt.Fprint(w, "hello world!!")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%v", existing), func(t *testing.T) {
+			dir := t.TempDir()
+			dest := filepath.Join(dir, "test.txt")
+			if existing {
+				os.WriteFile(dest, []byte("old content"), 0o644)
+			}
+			root := NewRootCmd()
+			root.SetOut(new(bytes.Buffer))
+			root.SetErr(new(bytes.Buffer))
+			root.SetArgs([]string{"download", "789", dest, "--force"})
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), "was not saved: its SHA256 on the server is 0000") {
+				t.Fatalf("expected a hash mismatch error, got %v", err)
+			}
+			entries, _ := os.ReadDir(dir)
+			if !existing && len(entries) != 0 {
+				t.Errorf("files were left behind: %v", entries)
+			}
+			if existing {
+				if len(entries) != 1 {
+					t.Errorf("files were left behind: %v", entries)
+				}
+				if content, _ := os.ReadFile(dest); string(content) != "old content" {
+					t.Errorf("existing file was changed: %q", content)
+				}
+			}
+		})
+	}
 }
 
 func TestDownloadArgErrors(t *testing.T) {
@@ -894,34 +1045,6 @@ func TestDownloadArgErrors(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
 			}
 		})
-	}
-}
-
-func TestLocalFileName(t *testing.T) {
-	tests := []struct {
-		displayName string
-		want        string // empty means an error
-	}{
-		{"report.pdf", "report.pdf"},
-		{"../../.bashrc", ".bashrc"},
-		{"/usr/bin/ls", "ls"},
-		{"evidence/logs/syslog", "syslog"},
-		{"..", ""},
-		{".", ""},
-		{"/", ""},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		got, err := localFileName(tt.displayName)
-		if tt.want == "" {
-			if err == nil {
-				t.Errorf("localFileName(%q) = %q, want an error", tt.displayName, got)
-			}
-			continue
-		}
-		if err != nil || got != tt.want {
-			t.Errorf("localFileName(%q) = %q, %v; want %q", tt.displayName, got, err, tt.want)
-		}
 	}
 }
 

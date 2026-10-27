@@ -13,6 +13,7 @@ func TestProgressTracker(t *testing.T) {
 	totalBytes := int64(100)
 	// Must start with "Download:" for ETA calculation to trigger speed window
 	pt := NewProgressTracker(&buf, totalBytes, "Download: test")
+	pt.Live = true
 
 	// Test initial display
 	pt.display()
@@ -74,5 +75,25 @@ func TestConfirmRepeatedOnSameReader(t *testing.T) {
 		if got != w {
 			t.Errorf("prompt %d: got %v, want %v", i, got, w)
 		}
+	}
+}
+
+func TestProgressTrackerNotLive(t *testing.T) {
+	var buf bytes.Buffer
+	pt := NewProgressTracker(&buf, 2048, "Upload: evidence.bin")
+	if pt.Live {
+		t.Fatal("a buffer is not a terminal")
+	}
+	pt.SetTotalChunks(2)
+	pt.Update(1024)
+	pt.IncrementChunk()
+	pt.Update(2048)
+	if buf.Len() > 0 {
+		t.Errorf("expected no output before Finish, got %q", buf.String())
+	}
+	pt.Finish()
+	out := buf.String()
+	if strings.ContainsAny(out, "\r\033") || strings.Count(out, "\n") != 1 || !strings.HasPrefix(out, "↑ evidence.bin ") || !strings.Contains(out, "2.0KB/2.0KB") {
+		t.Errorf("expected one plain line, got %q", out)
 	}
 }

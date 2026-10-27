@@ -16,9 +16,12 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -158,6 +161,9 @@ func TestWorkflowMonitor_NonInteractive(t *testing.T) {
 		if err == nil {
 			t.Fatal("Expected error for failed workflow, got nil")
 		}
+		if status == nil {
+			t.Fatalf("Expected non-nil status, got nil (err: %v)", err)
+		}
 		if status.Status != "FAILURE" {
 			t.Errorf("Expected status FAILURE, got %s", status.Status)
 		}
@@ -199,12 +205,12 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 	runCmd := &cobra.Command{Use: "run"}
 	runCmd.PersistentFlags().StringP("output-dir", "o", ".", "")
 	runCmd.PersistentFlags().String("download", "final", "")
-	runCmd.PersistentFlags().Bool("no-download", false, "")
 	runCmd.PersistentFlags().Bool("task-folders", false, "")
+	runCmd.PersistentFlags().Bool("dry-run", false, "")
 
 	t.Run("LongFlags", func(t *testing.T) {
 		segments := [][]string{
-			{"worker1", "--param1", "val1", "--output-dir", "/tmp/out", "--download", "all", "--task-folders"},
+			{"worker1", "--param1", "val1", "--output-dir", "/tmp/out", "--download", "all", "--task-folders", "--dry-run"},
 		}
 
 		spec, _, _, meta, err := BuildWorkflowSpec(runCmd, segments, "--then", allWorkers, createWorkerCmd)
@@ -220,6 +226,9 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 		}
 		if !meta.TaskFolders {
 			t.Errorf("Expected TaskFolders true, got false")
+		}
+		if !meta.DryRun {
+			t.Errorf("Expected DryRun true, got false")
 		}
 
 		if len(spec.Workflow.Tasks) != 1 {
@@ -240,9 +249,9 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 		}
 	})
 
-	t.Run("NoDownload", func(t *testing.T) {
+	t.Run("DownloadNone", func(t *testing.T) {
 		segments := [][]string{
-			{"worker1", "--no-download"},
+			{"worker1", "--download", "none"},
 		}
 		_, _, _, meta, err := BuildWorkflowSpec(runCmd, segments, "--then", allWorkers, createWorkerCmd)
 		if err != nil {
@@ -265,4 +274,55 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 			t.Errorf("Expected OutputDir /tmp/shorthand, got %s", meta.OutputDir)
 		}
 	})
+}
+
+func TestWorkerCommand(t *testing.T) {
+	for task, want := range map[string]string{
+		"openrelik-worker-strings.tasks.strings": "strings",
+		"plain":                                  "plain",
+	} {
+		if got := WorkerCommand(openrelik.Worker{TaskName: task}); got != want {
+			t.Errorf("WorkerCommand(%q) = %q, want %q", task, got, want)
+		}
+	}
+}
+
+func TestFinalTasks(t *testing.T) {
+	tasks := []openrelik.Task{{UUID: "a"}, {UUID: "b"}, {UUID: "c"}, {UUID: "d"}}
+	spec := func(s string) *string { return &s }
+	tests := []struct {
+		name    string
+		spec    *string
+		want    []string
+		wantErr bool
+	}{
+		{name: "chain", spec: spec(`{"workflow": {"tasks": [{"uuid": "a", "tasks": [{"uuid": "b", "tasks": [{"uuid": "c"}]}]}]}}`), want: []string{"c"}},
+		{name: "parallel", spec: spec(`{"workflow": {"tasks": [{"uuid": "a"}, {"uuid": "b"}, {"uuid": "c"}]}}`), want: []string{"a", "b", "c"}},
+		{name: "chain then parallel", spec: spec(`{"workflow": {"tasks": [{"uuid": "a", "tasks": [{"uuid": "b"}, {"uuid": "c", "tasks": [{"uuid": "d"}]}]}]}}`), want: []string{"b", "d"}},
+		{name: "no spec", wantErr: true},
+		{name: "invalid spec", spec: spec(`{`), wantErr: true},
+		{name: "spec of other tasks", spec: spec(`{"workflow": {"tasks": [{"uuid": "x"}]}}`), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := FinalTasks(tt.spec, tasks)
+			if tt.wantErr {
+				if !errors.Is(err, ErrFinalTasksUnknown) {
+					t.Fatalf("expected ErrFinalTasksUnknown, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var uuids []string
+			for u := range got {
+				uuids = append(uuids, u)
+			}
+			sort.Strings(uuids)
+			if strings.Join(uuids, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("FinalTasks() = %v, want %v", uuids, tt.want)
+			}
+		})
+	}
 }

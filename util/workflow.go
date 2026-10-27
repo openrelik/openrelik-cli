@@ -203,7 +203,13 @@ func (m *WorkflowMonitor) monitorInteractive(ctx context.Context) (*openrelik.Wo
 		if done {
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			close(stopUI)
+			<-uiDone
+			return lastStatus, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 
 	close(stopUI)
@@ -298,7 +304,11 @@ func (m *WorkflowMonitor) monitorNonInteractive(ctx context.Context) (*openrelik
 			}
 			break
 		}
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return lastStatus, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
 	}
 	return lastStatus, nil
 }
@@ -315,6 +325,7 @@ type WorkflowMonitorMeta struct {
 	TaskFolders      bool
 	UploadFolderID   int
 	UploadFolderName string
+	DryRun           bool
 }
 
 // BuildWorkflowSpec constructs a workflow specification from command segments.
@@ -347,6 +358,7 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 		meta.TaskFolders, _ = runCmd.Flags().GetBool("task-folders")
 		meta.UploadFolderID, _ = runCmd.Flags().GetInt("upload-folder-id")
 		meta.UploadFolderName, _ = runCmd.Flags().GetString("upload-folder-name")
+		meta.DryRun, _ = runCmd.Flags().GetBool("dry-run")
 	}
 
 	for _, segment := range segments {
@@ -367,6 +379,7 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 
 		if runCmd != nil {
 			tempCmd.PersistentFlags().AddFlagSet(runCmd.PersistentFlags())
+			tempCmd.PersistentFlags().AddFlagSet(runCmd.InheritedFlags())
 		}
 
 		tempCmd.SetArgs(segment[1:])
@@ -396,6 +409,9 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 		}
 		if tempCmd.Flags().Changed("upload-folder-name") {
 			meta.UploadFolderName, _ = tempCmd.Flags().GetString("upload-folder-name")
+		}
+		if dryRun, _ := tempCmd.Flags().GetBool("dry-run"); dryRun {
+			meta.DryRun = true
 		}
 
 		positionalArgs = append(positionalArgs, tempCmd.Flags().Args()...)

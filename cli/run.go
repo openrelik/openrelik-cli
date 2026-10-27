@@ -102,7 +102,7 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 	}
 
 	cmd := &cobra.Command{
-		Use:                use,
+		Use:                use + " <INPUT>...",
 		Short:              worker.DisplayName,
 		Long:               worker.Description,
 		DisableFlagParsing: true, // We will parse flags manually for each segment
@@ -136,27 +136,35 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			if helpWorker != nil {
 				tempCmd := createWorkerCmd(*helpWorker, nil)
 				tempCmd.DisableFlagParsing = false
+				if p := cmd.Parent(); p != nil {
+					for _, sub := range p.Commands() {
+						if sub.Name() == tempCmd.Name() {
+							sub.DisableFlagParsing = false
+							defer func() { sub.DisableFlagParsing = true }()
+							return sub.Help()
+						}
+					}
+					p.AddCommand(tempCmd)
+					defer p.RemoveCommand(tempCmd)
+				}
+				tempCmd.SetOut(cmd.OutOrStdout())
+				tempCmd.SetErr(cmd.ErrOrStderr())
 				return tempCmd.Help()
 			}
 
-			outputDir, _ := cmd.Flags().GetString("output-dir")
-			taskFolders, _ := cmd.Flags().GetBool("task-folders")
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			var downloadPolicy string
-
-			outputSpecified := outputFormat != "human"
-			showProgress := !quiet && !outputSpecified
-
 			// Root workflow type is always 'chain'
-			spec, positionalArgs, taskDownloadPrefs, meta, err := util.BuildWorkflowSpec(cmd, segments, delimiter, allWorkers, createWorkerCmd)
+			spec, positionalArgs, taskDownloadPrefs, meta, err := util.BuildWorkflowSpec(cmd.Parent(), segments, delimiter, allWorkers, createWorkerCmd)
 			if err != nil {
 				return err
 			}
 
 			// Use resolved global flags from BuildWorkflowSpec
-			downloadPolicy = meta.DownloadPolicy
-			outputDir = meta.OutputDir
-			taskFolders = meta.TaskFolders
+			downloadPolicy := meta.DownloadPolicy
+			outputDir := meta.OutputDir
+			taskFolders := meta.TaskFolders
+			dryRun := meta.DryRun
+			outputSpecified := outputFormat != "human"
+			showProgress := !quiet && !outputSpecified
 
 			if downloadPolicy != "all" && downloadPolicy != "final" && downloadPolicy != "none" {
 				return fmt.Errorf("invalid download policy: %s (must be 'all', 'final', or 'none')", downloadPolicy)
@@ -164,11 +172,11 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 
 			if dryRun {
 				if showProgress {
-					fmt.Println("Dry run: generating workflow spec...")
-					fmt.Printf("Inputs: %v\n", positionalArgs)
+					fmt.Fprintln(cmd.ErrOrStderr(), "Dry run: generating workflow spec...")
+					fmt.Fprintf(cmd.ErrOrStderr(), "Inputs: %v\n", positionalArgs)
 				}
 				if !quiet {
-					encoder := json.NewEncoder(os.Stdout)
+					encoder := json.NewEncoder(cmd.OutOrStdout())
 					encoder.SetIndent("", "  ")
 					if err := encoder.Encode(spec); err != nil {
 						return fmt.Errorf("failed to encode workflow spec: %w", err)

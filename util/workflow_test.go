@@ -158,6 +158,9 @@ func TestWorkflowMonitor_NonInteractive(t *testing.T) {
 		if err == nil {
 			t.Fatal("Expected error for failed workflow, got nil")
 		}
+		if status == nil {
+			t.Fatalf("Expected non-nil status, got nil (err: %v)", err)
+		}
 		if status.Status != "FAILURE" {
 			t.Errorf("Expected status FAILURE, got %s", status.Status)
 		}
@@ -201,10 +204,11 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 	runCmd.PersistentFlags().String("download", "final", "")
 	runCmd.PersistentFlags().Bool("no-download", false, "")
 	runCmd.PersistentFlags().Bool("task-folders", false, "")
+	runCmd.PersistentFlags().Bool("dry-run", false, "")
 
 	t.Run("LongFlags", func(t *testing.T) {
 		segments := [][]string{
-			{"worker1", "--param1", "val1", "--output-dir", "/tmp/out", "--download", "all", "--task-folders"},
+			{"worker1", "--param1", "val1", "--output-dir", "/tmp/out", "--download", "all", "--task-folders", "--dry-run"},
 		}
 
 		spec, _, _, meta, err := BuildWorkflowSpec(runCmd, segments, "--then", allWorkers, createWorkerCmd)
@@ -220,6 +224,9 @@ func TestBuildWorkflowSpec_Flags(t *testing.T) {
 		}
 		if !meta.TaskFolders {
 			t.Errorf("Expected TaskFolders true, got false")
+		}
+		if !meta.DryRun {
+			t.Errorf("Expected DryRun true, got false")
 		}
 
 		if len(spec.Workflow.Tasks) != 1 {

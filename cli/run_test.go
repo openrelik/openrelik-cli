@@ -16,6 +16,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -271,5 +272,178 @@ func TestRunFailedWorkflow(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(outDir, "partial.txt")); string(got) != "partial" {
 		t.Errorf("expected the results to be downloaded, got %q", got)
+	}
+}
+
+func TestRunDryRunAndSegmentFlags(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+
+	testWorkers := []openrelik.Worker{
+		{
+			TaskName:    "openrelik-worker-strings.tasks.strings",
+			DisplayName: "Strings",
+			Description: "Extract strings from files",
+		},
+		{
+			TaskName:    "openrelik-worker-grep.tasks.grep",
+			DisplayName: "Grep",
+			Description: "Search for patterns in files",
+			TaskConfig: []openrelik.TaskConfig{
+				{Name: "regex", Type: "string"},
+			},
+		},
+	}
+	if err := config.SaveWorkersCache(testWorkers); err != nil {
+		t.Fatalf("Failed to save workers cache: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		args           []string
+		wantQuiet      bool
+		wantStderrText string
+	}{
+		{
+			name:           "dry-run before worker",
+			args:           []string{"run", "--dry-run", "strings", "123"},
+			wantStderrText: "Dry run: generating workflow spec...",
+		},
+		{
+			name:           "dry-run after worker before input",
+			args:           []string{"run", "strings", "--dry-run", "123"},
+			wantStderrText: "Dry run: generating workflow spec...",
+		},
+		{
+			name:           "dry-run after input",
+			args:           []string{"run", "strings", "123", "--dry-run"},
+			wantStderrText: "Dry run: generating workflow spec...",
+		},
+		{
+			name:           "chained workers with dry-run at end",
+			args:           []string{"run", "strings", "--then", "grep", "--regex", "password", "100", "--dry-run"},
+			wantStderrText: "Inputs: [100]",
+		},
+		{
+			name:      "quiet flag after worker suppresses output",
+			args:      []string{"run", "strings", "123", "--dry-run", "-q"},
+			wantQuiet: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outputFormat = "human"
+			quiet = false
+			defer func() {
+				outputFormat = "human"
+				quiet = false
+			}()
+
+			root := NewRootCmd()
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(tt.args)
+
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+
+			if tt.wantQuiet {
+				if stdout.Len() != 0 || stderr.Len() != 0 {
+					t.Errorf("expected empty stdout/stderr with -q, got stdout=%q stderr=%q", stdout.String(), stderr.String())
+				}
+				return
+			}
+
+			var spec util.WorkflowSpec
+			if err := json.Unmarshal(stdout.Bytes(), &spec); err != nil {
+				t.Fatalf("stdout is not valid JSON: %v\nstdout:\n%s", err, stdout.String())
+			}
+			if len(spec.Workflow.Tasks) == 0 {
+				t.Errorf("expected at least one task in workflow spec, got 0")
+			}
+			if !strings.Contains(stderr.String(), tt.wantStderrText) {
+				t.Errorf("expected stderr to contain %q, got %q", tt.wantStderrText, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunWorkerHelp(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+
+	testWorkers := []openrelik.Worker{
+		{
+			TaskName:    "openrelik-worker-strings.tasks.strings",
+			DisplayName: "Strings",
+			Description: "Extract strings from files",
+			TaskConfig: []openrelik.TaskConfig{
+				{Name: "min-len", Description: "Minimum string length", Type: "integer", Default: float64(4)},
+			},
+		},
+		{
+			TaskName:    "openrelik-worker-grep.tasks.grep",
+			DisplayName: "Grep",
+			Description: "Search for patterns in files",
+			TaskConfig: []openrelik.TaskConfig{
+				{Name: "regex", Description: "Regex pattern", Type: "string"},
+			},
+		},
+	}
+	if err := config.SaveWorkersCache(testWorkers); err != nil {
+		t.Fatalf("Failed to save workers cache: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		args         []string
+		wantContains []string
+	}{
+		{
+			name: "single worker help",
+			args: []string{"run", "strings", "--help"},
+			wantContains: []string{
+				"openrelik run strings <INPUT>... [flags]",
+				"--min-len",
+				"--then",
+				"--and",
+				"--output-dir",
+				"--dry-run",
+			},
+		},
+		{
+			name: "chained worker help shows last segment with help",
+			args: []string{"run", "strings", "--then", "grep", "--help"},
+			wantContains: []string{
+				"openrelik run grep <INPUT>... [flags]",
+				"--regex",
+				"--then",
+				"--output-dir",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := NewRootCmd()
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			root.SetArgs(tt.args)
+
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+
+			out := stdout.String()
+			for _, want := range tt.wantContains {
+				if !strings.Contains(out, want) {
+					t.Errorf("expected help output to contain %q, got:\n%s", want, out)
+				}
+			}
+		})
 	}
 }

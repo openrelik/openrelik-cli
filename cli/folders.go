@@ -2,14 +2,18 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"text/tabwriter"
 	"time"
 
 	"github.com/openrelik/openrelik-cli/util"
@@ -18,7 +22,6 @@ import (
 )
 
 var (
-	parentID int
 	maxDepth int
 )
 
@@ -45,14 +48,19 @@ func newListFoldersCmd() *cobra.Command {
 	var reverse bool
 
 	cmd := &cobra.Command{
-		Use:     "list [FOLDER_ID]",
+		Use:     "list [FOLDER]",
 		Aliases: []string{"ls"},
 		Short:   "List folder contents",
 		Long: `List folder contents in OpenRelik.
 
-Without FOLDER_ID, lists all root folders. With FOLDER_ID, lists the
-subfolders and files in that folder. FOLDER_ID is the integer ID shown
-by a previous 'folder list' call.
+Without FOLDER, lists all root folders. With FOLDER, lists the
+subfolders and files in that folder.
+
+FOLDER is either a folder ID or a path of folder names starting at the
+root folders, such as 'Case A/evidence/'. An argument made only of
+digits is an ID; add a trailing '/' to treat it as a name instead
+(e.g. '2024/'). If more than one folder matches a path, the matches are
+listed so you can pick one by ID.
 
 Folder names end in '/' and have TYPE folder. Folder and file IDs are
 separate, so pass folder IDs to 'folder list' and file IDs to commands
@@ -68,6 +76,9 @@ recently updated entries, in the selected sort order.`,
   # List subfolders and files in folder 42
   openrelik folder list 42
 
+  # List a folder by its path from the root folders
+  openrelik folder list "Case A/evidence/"
+
   # Most recently updated first
   openrelik folder list 42 -r
 
@@ -79,7 +90,7 @@ recently updated entries, in the selected sort order.`,
 
   # Print the IDs of the files in folder 42
   openrelik folder list 42 --format json | jq '.files[].id'`,
-		Args: util.UseArgs(),
+		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if limit < 0 {
 				return fmt.Errorf("invalid limit: %d (must be 0 or greater)", limit)
@@ -88,18 +99,17 @@ recently updated entries, in the selected sort order.`,
 				return fmt.Errorf("invalid sort: %q (must be time or name)", sortBy)
 			}
 
-			var fID int
-			var err error
-			if len(args) > 0 {
-				fID, err = strconv.Atoi(args[0])
-				if err != nil {
-					return fmt.Errorf("invalid folder ID: %w", err)
-				}
-			}
-
 			client, err := newClient()
 			if err != nil {
 				return err
+			}
+
+			var fID int
+			if len(args) > 0 {
+				fID, err = resolveFolder(cmd.Context(), client, args[0])
+				if err != nil {
+					return err
+				}
 			}
 
 			var folders []openrelik.Folder
@@ -139,6 +149,118 @@ recently updated entries, in the selected sort order.`,
 	cmd.Flags().BoolVarP(&reverse, "reverse", "r", false, "Reverse the sort order")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Show only the N most recently updated entries (0 shows all)")
 	return cmd
+}
+
+// folderIDPattern matches arguments that are folder IDs rather than paths.
+var folderIDPattern = regexp.MustCompile(`^[0-9]+$`)
+
+// resolveFolder turns a folder argument into a folder ID. Arguments made
+// only of digits are IDs; anything else is a path of folder names starting
+// at the root folders.
+func resolveFolder(ctx context.Context, client *openrelik.Client, arg string) (int, error) {
+	if folderIDPattern.MatchString(arg) {
+		id, err := strconv.Atoi(arg)
+		if err != nil || id == 0 {
+			return 0, fmt.Errorf("invalid folder ID: %s", arg)
+		}
+		return id, nil
+	}
+	return resolveFolderPath(ctx, client, arg)
+}
+
+// folderMatch is a folder found while resolving a path, with the names of
+// the folders leading to it.
+type folderMatch struct {
+	folder openrelik.Folder
+	path   []string
+}
+
+func (m folderMatch) location() string { return formatFolderPath(m.path) }
+
+func formatFolderPath(names []string) string {
+	return "/" + strings.Join(names, "/") + "/"
+}
+
+// resolveFolderPath walks a path like "Case A/evidence/" from the root
+// folders. Every branch whose names match is followed, so a path is only
+// ambiguous if more than one complete path matches.
+func resolveFolderPath(ctx context.Context, client *openrelik.Client, path string) (int, error) {
+	var segments []string
+	for _, seg := range strings.Split(path, "/") {
+		if seg != "" {
+			segments = append(segments, seg)
+		}
+	}
+	if len(segments) == 0 {
+		return 0, fmt.Errorf("invalid folder path %q", path)
+	}
+
+	roots, err := fetchAllRootFolders(ctx, client)
+	if err != nil {
+		return 0, err
+	}
+	matches := matchFolderName(roots, segments[0], nil)
+	if len(matches) == 0 {
+		return 0, fmt.Errorf("no root folder named %q", segments[0])
+	}
+
+	for i, seg := range segments[1:] {
+		var next []folderMatch
+		for _, m := range matches {
+			subfolders, _, err := client.Folders().ListSubFolders(ctx, m.folder.ID)
+			if err != nil {
+				return 0, err
+			}
+			next = append(next, matchFolderName(subfolders, seg, m.path)...)
+		}
+		if len(next) == 0 {
+			return 0, fmt.Errorf("no folder named %q in %s", seg, formatFolderPath(segments[:i+1]))
+		}
+		matches = next
+	}
+
+	if len(matches) > 1 {
+		return 0, ambiguousFolderError(path, matches)
+	}
+	return matches[0].folder.ID, nil
+}
+
+// matchFolderName returns the folders named name, falling back to a
+// case-insensitive match when no name matches exactly.
+func matchFolderName(folders []openrelik.Folder, name string, parent []string) []folderMatch {
+	var exact, folded []folderMatch
+	for _, f := range folders {
+		m := folderMatch{folder: f, path: append(slices.Clone(parent), f.DisplayName)}
+		switch {
+		case f.DisplayName == name:
+			exact = append(exact, m)
+		case strings.EqualFold(f.DisplayName, name):
+			folded = append(folded, m)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	return folded
+}
+
+// ambiguousFolderError lists the folders matching path so the user can
+// pick one by ID.
+func ambiguousFolderError(path string, matches []folderMatch) error {
+	sort.SliceStable(matches, func(i, j int) bool {
+		return matches[i].folder.UpdatedAt.Before(matches[j].folder.UpdatedAt)
+	})
+	var b strings.Builder
+	fmt.Fprintf(&b, "multiple folders match %q:\n\n", path)
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tLOCATION\tOWNER\tUPDATED")
+	for _, m := range matches {
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", m.folder.ID, m.location(),
+			m.folder.User.Username, util.FormatTimeAgo(m.folder.UpdatedAt))
+	}
+	tw.Flush()
+	b.WriteString("\nRun 'openrelik folder list <ID>' with one of the IDs above.")
+	return errors.New(b.String())
 }
 
 // fetchFolderContents fetches the subfolders and files of a folder
@@ -260,19 +382,25 @@ func sortEntries(entries []listEntry, sortBy string, reverse bool) {
 }
 
 func newCreateFolderCmd() *cobra.Command {
+	var parent string
+
 	cmd := &cobra.Command{
 		Use:   "create <NAME>",
 		Short: "Create a folder",
 		Long: `Create a new folder in OpenRelik.
 
 Without --parent, creates a root-level folder. With --parent, creates a
-subfolder inside the specified parent folder.`,
+subfolder inside the specified parent folder. The parent is a folder ID
+or a path of folder names, as accepted by 'folder list'.`,
 		Example: `  # Create a root folder
   openrelik folder create "Investigations"
 
   # Create a subfolder inside folder 42
-  openrelik folder create "Case 2024-001" --parent 42`,
-		Args: util.UseArgs(),
+  openrelik folder create "Case 2024-001" --parent 42
+
+  # Create a subfolder by parent path
+  openrelik folder create "logs" --parent "Case A/evidence/"`,
+		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := newClient()
 			if err != nil {
@@ -281,7 +409,11 @@ subfolder inside the specified parent folder.`,
 
 			name := args[0]
 			var folder *openrelik.Folder
-			if parentID != 0 {
+			if cmd.Flags().Changed("parent") {
+				parentID, err := resolveFolder(cmd.Context(), client, parent)
+				if err != nil {
+					return err
+				}
 				folder, _, err = client.Folders().CreateSubFolder(cmd.Context(), parentID, name)
 			} else {
 				folder, _, err = client.Folders().CreateRootFolder(cmd.Context(), name)
@@ -295,12 +427,12 @@ subfolder inside the specified parent folder.`,
 		},
 	}
 
-	cmd.Flags().IntVarP(&parentID, "parent", "p", 0, "Parent folder ID")
+	cmd.Flags().StringVarP(&parent, "parent", "p", "", "Parent folder ID or path")
 	return cmd
 }
 
 func newUploadCmd() *cobra.Command {
-	var folderID int
+	var folder string
 	var name string
 
 	cmd := &cobra.Command{
@@ -312,7 +444,8 @@ chunked uploads with progress tracking.
 Directories are uploaded recursively up to --depth levels deep, and each
 one is recreated as a folder of the same name in the destination.
 
-With --folder, uploads go into that existing folder. Without it, a new
+With --folder, uploads go into that existing folder, given as a folder ID
+or a path of folder names as accepted by 'folder list'. Without it, a new
 root folder is created: for a single directory it is named after the
 directory and holds its contents; otherwise it is named after the current
 time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
@@ -321,6 +454,9 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 
   # Upload several files to folder 42
   openrelik folder upload *.E01 --folder 42
+
+  # Upload to a folder by its path
+  openrelik folder upload disk.E01 --folder "Case A/evidence/"
 
   # Upload a directory into a new root folder named "evidence"
   openrelik folder upload ./evidence/
@@ -333,10 +469,6 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 		Args:         util.UseArgs(),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Flags().Changed("folder") && folderID <= 0 {
-				return fmt.Errorf("invalid folder ID: %d", folderID)
-			}
-
 			// Check every path up front so nothing is created for a typo.
 			isDir := make([]bool, len(args))
 			for i, p := range args {
@@ -352,21 +484,26 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 				return err
 			}
 
-			view := &UploadView{FolderID: folderID}
-			if folderID == 0 {
+			view := &UploadView{}
+			if cmd.Flags().Changed("folder") {
+				view.FolderID, err = resolveFolder(cmd.Context(), client, folder)
+				if err != nil {
+					return err
+				}
+			} else {
 				// A single directory becomes the new root folder itself.
 				single := len(args) == 1 && isDir[0]
 				if name == "" {
 					name = defaultUploadFolderName(args, isDir, time.Now())
 				}
-				folder, _, err := client.Folders().CreateRootFolder(cmd.Context(), name)
+				created, _, err := client.Folders().CreateRootFolder(cmd.Context(), name)
 				if err != nil {
 					return fmt.Errorf("failed to create root folder: %w", err)
 				}
-				view.Created = folder
-				view.FolderID = folder.ID
+				view.Created = created
+				view.FolderID = created.ID
 				if single {
-					view.Uploads, err = uploadDirContents(cmd.Context(), cmd.ErrOrStderr(), client, args[0], folder.ID, 0)
+					view.Uploads, err = uploadDirContents(cmd.Context(), cmd.ErrOrStderr(), client, args[0], created.ID, 0)
 					if err != nil {
 						return err
 					}
@@ -392,7 +529,7 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 		},
 	}
 
-	cmd.Flags().IntVar(&folderID, "folder", 0, "ID of an existing folder to upload into (default: create a new root folder)")
+	cmd.Flags().StringVar(&folder, "folder", "", "ID or path of an existing folder to upload into (default: create a new root folder)")
 	cmd.Flags().StringVar(&name, "name", "", "Name of the new root folder")
 	cmd.Flags().IntVarP(&maxDepth, "depth", "d", 3, "Maximum subfolder depth to upload")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 4*1024*1024, "Chunk size in bytes")

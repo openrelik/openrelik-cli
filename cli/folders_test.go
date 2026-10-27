@@ -599,6 +599,21 @@ func newUploadServer(t *testing.T) *uploadServer {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			// A small tree for resolving --folder and --parent paths:
+			// /Case A/ (42) containing /evidence/ (43).
+			switch r.URL.Path {
+			case "/api/v1/folders/all/":
+				fmt.Fprint(w, `{"folders": [{"id": 42, "display_name": "Case A"}], "page": 1, "page_size": 100, "total_count": 1}`)
+			case "/api/v1/folders/42/folders/":
+				fmt.Fprint(w, `[{"id": 43, "display_name": "evidence"}]`)
+			case "/api/v1/folders/43/folders/":
+				fmt.Fprint(w, `[]`)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+			return
+		}
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -700,6 +715,12 @@ func TestFolderUpload(t *testing.T) {
 			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502", "auth.log": "503"},
 		},
 		{
+			name:        "file into folder given by path",
+			args:        []string{a, "--folder", "Case A/evidence/"},
+			wantUploads: map[string]string{"a.txt": "43"},
+			wantOutput:  []string{`File "a.txt" uploaded to folder 43`},
+		},
+		{
 			name:           "directory into existing folder is created inside it",
 			args:           []string{evidence, "--folder", "42"},
 			wantSubfolders: []string{"42/evidence", "501/logs", "502/deep"},
@@ -776,6 +797,7 @@ func TestFolderUploadErrors(t *testing.T) {
 		{name: "missing path creates nothing", args: []string{a, filepath.Join(loose, "missing")}, wantErr: "no such file"},
 		{name: "folder and name conflict", args: []string{a, "--folder", "42", "--name", "x"}, wantErr: "none of the others can be"},
 		{name: "invalid folder ID", args: []string{a, "--folder", "0"}, wantErr: "invalid folder ID"},
+		{name: "unknown folder path", args: []string{a, "--folder", "Case A/nope/"}, wantErr: `no folder named "nope" in /Case A/`},
 		{name: "no paths", args: []string{}, wantErr: "PATH"},
 	}
 	for _, tt := range tests {
@@ -839,5 +861,170 @@ func TestDefaultUploadFolderName(t *testing.T) {
 		if got := defaultUploadFolderName(tt.paths, tt.isDir, now); got != tt.want {
 			t.Errorf("defaultUploadFolderName(%q) = %q, want %q", tt.paths, got, tt.want)
 		}
+	}
+}
+
+// newFolderTreeServer serves a fixed folder tree for path resolution tests:
+//
+//	/Case A/ (1)        /evidence/ (11)
+//	/dup/ (2)           /logs/ (21), /shared/ (22)
+//	/dup/ (3)           /shared/ (31)
+//	/42/ (4)
+//
+// Every folder is empty of files. Requested subfolder listings are recorded.
+func newFolderTreeServer(t *testing.T, listed *[]string) *httptest.Server {
+	t.Helper()
+	folder := func(id int, name string) string {
+		return fmt.Sprintf(`{"id": %d, "display_name": %q, "user": {"username": "dev"}}`, id, name)
+	}
+	children := map[string][]string{
+		"1": {folder(11, "evidence")},
+		"2": {folder(21, "logs"), folder(22, "shared")},
+		"3": {folder(31, "shared")},
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		switch {
+		case r.URL.Path == "/api/v1/folders/all/":
+			roots := []string{folder(1, "Case A"), folder(2, "dup"), folder(3, "dup"), folder(4, "42")}
+			fmt.Fprintf(w, `{"folders": [%s], "page": 1, "page_size": 100, "total_count": 4}`, strings.Join(roots, ","))
+		case len(parts) == 5 && parts[4] == "folders":
+			*listed = append(*listed, parts[3])
+			fmt.Fprintf(w, "[%s]", strings.Join(children[parts[3]], ","))
+		case len(parts) == 5 && parts[4] == "files":
+			fmt.Fprint(w, "[]")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestFolderListByPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		arg        string
+		wantFolder string // ID whose contents are listed
+		wantErr    []string
+	}{
+		{name: "root name with trailing slash", arg: "Case A/", wantFolder: "1"},
+		{name: "root name without slash", arg: "Case A", wantFolder: "1"},
+		{name: "nested path", arg: "Case A/evidence/", wantFolder: "11"},
+		{name: "leading slash", arg: "/Case A/evidence", wantFolder: "11"},
+		{name: "case-insensitive fallback", arg: "case a/EVIDENCE/", wantFolder: "11"},
+		{name: "digits are an ID", arg: "42", wantFolder: "42"},
+		{name: "trailing slash makes digits a name", arg: "42/", wantFolder: "4"},
+		{name: "duplicate parent resolved by child", arg: "dup/logs/", wantFolder: "21"},
+		{
+			name:    "duplicate root names",
+			arg:     "dup/",
+			wantErr: []string{`multiple folders match "dup/"`, "ID", "LOCATION", "\n2 ", "\n3 ", "/dup/", "folder list <ID>"},
+		},
+		{
+			name:    "duplicate complete paths",
+			arg:     "dup/shared/",
+			wantErr: []string{`multiple folders match "dup/shared/"`, "\n22 ", "\n31 ", "/dup/shared/"},
+		},
+		{name: "missing root", arg: "nope/", wantErr: []string{`no root folder named "nope"`}},
+		{name: "missing child", arg: "Case A/nope/", wantErr: []string{`no folder named "nope" in /Case A/`}},
+		{name: "empty path", arg: "/", wantErr: []string{`invalid folder path "/"`}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var listed []string
+			server := newFolderTreeServer(t, &listed)
+			defer server.Close()
+
+			_, _, err := runFolderListServer(t, server, tt.arg)
+			if len(tt.wantErr) > 0 {
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+				for _, want := range tt.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("expected error to contain %q, got:\n%s", want, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if len(listed) == 0 || listed[len(listed)-1] != tt.wantFolder {
+				t.Errorf("listed folders %v, want the last to be %s", listed, tt.wantFolder)
+			}
+		})
+	}
+}
+
+func TestFolderCreateWithParentPath(t *testing.T) {
+	tests := []struct {
+		name           string
+		parent         string
+		wantSubfolders []string
+		wantErr        string
+	}{
+		{name: "parent ID", parent: "42", wantSubfolders: []string{"42/New"}},
+		{name: "parent path", parent: "Case A/evidence/", wantSubfolders: []string{"43/New"}},
+		{name: "unknown parent path", parent: "nope/", wantErr: `no root folder named "nope"`},
+		{name: "zero parent ID", parent: "0", wantErr: "invalid folder ID: 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			t.Setenv("OPENRELIK_API_KEY", "test-key")
+			t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+			root := NewRootCmd()
+			root.SetOut(new(bytes.Buffer))
+			root.SetErr(new(bytes.Buffer))
+			root.SetArgs([]string{"folder", "create", "New", "--parent", tt.parent})
+			err := root.Execute()
+
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+				if len(server.subfolders)+len(server.roots) > 0 {
+					t.Errorf("nothing should be created on error, got %q %q", server.roots, server.subfolders)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if strings.Join(server.subfolders, ",") != strings.Join(tt.wantSubfolders, ",") {
+				t.Errorf("created subfolders %q, want %q", server.subfolders, tt.wantSubfolders)
+			}
+		})
+	}
+}
+
+func TestFolderListEmptyPrintsNothing(t *testing.T) {
+	var listed []string
+	server := newFolderTreeServer(t, &listed)
+	defer server.Close()
+
+	// Folder "42/" (ID 4) has no subfolders or files.
+	stdout, stderr, err := runFolderListServer(t, server, "42/")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if stdout != "" || stderr != "" {
+		t.Errorf("expected no output for an empty folder, got stdout %q, stderr %q", stdout, stderr)
+	}
+
+	// JSON still returns the (empty) object.
+	stdout, _, err = runFolderListServer(t, server, "42/", "--format", "json")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	if strings.TrimSpace(stdout) != `{
+  "folders": [],
+  "files": []
+}` {
+		t.Errorf("unexpected JSON for an empty folder: %q", stdout)
 	}
 }

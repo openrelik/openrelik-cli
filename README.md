@@ -118,9 +118,9 @@ openrelik user me --format json
 
 Organize files in hierarchical directories.
 
-*   `folder list [FOLDER_ID]`: List root folders. If you provide a folder ID, list the subfolders and files inside that folder. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
-*   `folder create <NAME>`: Create a new folder. Use `--parent <ID>` to create a subfolder.
-*   `folder upload <PATH> [PATH...]`: Upload files and directories. Directories are uploaded recursively (up to `--depth` levels, default 3) and recreated as folders. Use `--folder <ID>` to upload into an existing folder; otherwise a new root folder is created, named after the directory when uploading a single directory, or after the current time (e.g. `Upload 2026-10-27 14:05`). Use `--name` to choose the new folder's name.
+*   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"`; an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
+*   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder.
+*   `folder upload <PATH> [PATH...]`: Upload files and directories. Directories are uploaded recursively (up to `--depth` levels, default 3) and recreated as folders. Use `--folder <FOLDER>` (an ID or path) to upload into an existing folder; otherwise a new root folder is created, named after the directory when uploading a single directory, or after the current time (e.g. `Upload 2026-10-27 14:05`). Use `--name` to choose the new folder's name.
 
 #### Examples
 
@@ -131,8 +131,14 @@ openrelik folder create "Investigation 2026"
 # Create a subfolder under folder ID 12
 openrelik folder create "Evidence" --parent 12
 
+# Create a subfolder by parent path
+openrelik folder create "logs" --parent "Investigation 2026/Evidence/"
+
 # List the subfolders and files in folder 12
 openrelik folder list 12
+
+# List a folder by its path from the root folders
+openrelik folder list "Case A/evidence/"
 
 # Upload a disk image to folder 42
 openrelik folder upload /path/to/image.dd --folder 42

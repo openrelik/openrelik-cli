@@ -98,6 +98,10 @@ type folderContents struct {
 }
 
 func (v *FolderContentsView) RenderHuman(w io.Writer) error {
+	// Like 'ls', an empty folder prints nothing.
+	if len(v.Entries) == 0 {
+		return nil
+	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tDISPLAY NAME\tSIZE\tTYPE\tUPDATED")
 	for _, e := range v.Entries {

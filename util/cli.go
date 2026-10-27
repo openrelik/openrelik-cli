@@ -39,6 +39,33 @@ func UseArgs() cobra.PositionalArgs {
 	}
 }
 
+// UseArgsWithQuoteHint is UseArgs for commands whose last argument may
+// contain spaces, such as folder names and paths. When there are too many
+// arguments, the error suggests quoting them, since the shell most likely
+// split an unquoted argument on its spaces.
+func UseArgsWithQuoteHint() cobra.PositionalArgs {
+	validate := UseArgs()
+	return func(cmd *cobra.Command, args []string) error {
+		err := validate(cmd, args)
+		if err == nil {
+			return nil
+		}
+		required, optional, variadic := parseUseArgs(cmd.Use)
+		max := len(required) + len(optional)
+		if variadic || max == 0 || len(args) <= max {
+			return err
+		}
+		var last string
+		if len(optional) > 0 {
+			last = optional[len(optional)-1]
+		} else {
+			last = required[len(required)-1]
+		}
+		return fmt.Errorf("too many arguments: expected at most %d, got %d\nQuote %s if it contains spaces: %q",
+			max, len(args), last, strings.Join(args[max-1:], " "))
+	}
+}
+
 func parseUseArgs(use string) (required []string, optional []string, variadic bool) {
 	for _, token := range strings.Fields(use) {
 		if strings.HasPrefix(token, "<") && strings.HasSuffix(token, ">") {

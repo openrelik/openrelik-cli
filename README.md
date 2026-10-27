@@ -122,7 +122,7 @@ openrelik user me --format json
 Organize files in hierarchical directories.
 
 *   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"`; an argument of only digits is an ID, so add a trailing `/` to use it as a name. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
-*   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list` and the `--folder`/`--parent` flags. Shows the 30 most recently updated matches by default; use `--limit N` to show more or `--limit 0` for all. `--sort` and `-r` work as in `folder list`. Use `--latest` to show only the most recently updated match, and `--root` to search only root folders (and folders shared with you).
+*   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list`, `upload` and `folder create --parent`. Shows the 30 most recently updated matches by default; use `--limit N` to show more or `--limit 0` for all. `--sort` and `-r` work as in `folder list`. Use `--latest` to show only the most recently updated match, and `--root` to search only root folders (and folders shared with you).
 *   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name; use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes.
 *   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder. Use `--exist-ok` to print an existing folder with the same name in that location instead of creating a duplicate, which makes scripts safe to re-run. If several such folders exist it fails and lists them; add `--latest` to use the most recently updated one.
 
@@ -155,31 +155,41 @@ openrelik folder tree "Case A/"
 
 Move files between your machine and OpenRelik.
 
-*   `upload <PATH> [PATH...]`: Upload files and directories. Directories are uploaded recursively (up to `--depth` levels, default 3) and recreated as folders. Use `--folder <FOLDER>` (an ID or path) to upload into an existing folder; otherwise a new root folder is created, named after the directory when uploading a single directory, or after the current time (e.g. `Upload 2026-10-27 14:05`). Use `--name` to choose the new folder's name.
-*   `download --file <FILE_ID> [DESTINATION]`: Download a file. `DESTINATION` may be a file path or an existing directory; by default the file is saved in the current directory under its original name.
+*   `upload <PATH>... [FOLDER]`: Upload files and directories. With more than one argument, the last one is the existing folder to upload into, given as an ID or path (like `cp`). Directories are uploaded recursively (up to `--depth` levels, default 3) and recreated as subfolders. With a single argument, or with `/` as `FOLDER`, a new root folder is created instead: a single directory becomes the root folder itself, and anything else goes into a folder named after the current time (e.g. `Upload 2026-10-27 14:05`). Use `--name` to choose the new folder's name. Files given directly are skipped if `FOLDER` already holds a file with the same name and SHA256, so an interrupted upload can simply be run again; if the server has no hash for a file with the same name and size (files over 5 GB aren't hashed), it counts as the same file. Use `--force` to upload anyway.
+*   `download <FILE> [DESTINATION]`: Download a file. `FILE` is a file ID or a path of folder names ending in the file name, as for `file cat`. `DESTINATION` may be a file path or an existing directory; by default the file is saved in the current directory under its original name.
 
 #### Examples
 
 ```bash
 # Upload a disk image to folder 42, or to a folder by its path
-openrelik upload /path/to/image.dd --folder 42
-openrelik upload /path/to/image.dd --folder "Case A/evidence/"
+openrelik upload /path/to/image.dd 42
+openrelik upload /path/to/image.dd "Case A/evidence/"
 
 # Upload a directory into a new root folder named "evidence"
 openrelik upload /path/to/evidence
 
 # Upload several files into a new root folder with a chosen name
-openrelik upload disk.E01 memory.raw --name "Case 2026-001"
+openrelik upload disk.E01 memory.raw / --name "Case 2026-001"
 
-# Download file 105 into a directory
-openrelik download --file 105 /tmp/downloads/
+# Download file 105 into a directory, or a file by its path
+openrelik download 105 /tmp/downloads/
+openrelik download "Case A/evidence/notes.txt"
 ```
 
 ### File Management (`file`)
 
-Inspect forensic files.
+Inspect and print forensic files.
 
-*   `file info <FILE_ID>`: Return file metadata including size, hashes, and MIME type.
+*   `file info <FILE>`: Return file metadata including size, hashes, and MIME type. `FILE` is a file ID or a path, as for `file cat`.
+*   `file cat <FILE> [FILE...]`: Print file contents to stdout. FILE is a file ID or a path of folder names ending in the file name, such as `"Case A/evidence/notes.txt"`. Several files are concatenated in the order given. Use `-n` to number the lines, like `cat -n`, and `-c N` (e.g. `512`, `4K`, `10M`) to print only the first N bytes of each file; the download stops once they have been read. Files that look binary are refused when stdout is a terminal; pipe or redirect the output to print them anyway.
+
+#### Example
+
+```bash
+openrelik file cat 4070 | grep -i password
+openrelik file cat "Case A/logs/syslog" | head -50
+openrelik file cat -c 512 "Case A/evidence/disk.E01" | xxd
+```
 
 ### Worker Management (`worker`)
 

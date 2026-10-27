@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -63,6 +64,14 @@ type UploadView struct {
 	Created  *openrelik.Folder
 	FolderID int
 	Uploads  []uploadedFile
+	Skipped  []skippedFile
+}
+
+func (v *UploadView) renderSkipped(w io.Writer) {
+	for _, s := range v.Skipped {
+		fmt.Fprintf(w, "Skipped %q: already in folder %d as file %d (%s)\n",
+			filepath.Base(s.Path), s.FolderID, s.FileID, s.Reason)
+	}
 }
 
 func (v *UploadView) RenderHuman(w io.Writer) error {
@@ -73,6 +82,7 @@ func (v *UploadView) RenderHuman(w io.Writer) error {
 		fmt.Fprintf(w, "File %q uploaded to folder %d (ID %d)\n",
 			u.File.DisplayName, u.FolderID, u.File.ID)
 	}
+	v.renderSkipped(w)
 	return nil
 }
 
@@ -85,6 +95,10 @@ func (v *UploadView) RenderVerbose(w io.Writer) error {
 		files = append(files, *u.File)
 	}
 	util.FprintTable(w, files)
+	if len(v.Skipped) > 0 {
+		fmt.Fprintln(w)
+		v.renderSkipped(w)
+	}
 	return nil
 }
 
@@ -93,11 +107,16 @@ func (v *UploadView) UnwrapJSON() any {
 	if uploads == nil {
 		uploads = []uploadedFile{}
 	}
+	skipped := v.Skipped
+	if skipped == nil {
+		skipped = []skippedFile{}
+	}
 	return struct {
 		FolderID int               `json:"folder_id"`
 		Created  *openrelik.Folder `json:"created_folder"`
 		Uploads  []uploadedFile    `json:"uploads"`
-	}{v.FolderID, v.Created, uploads}
+		Skipped  []skippedFile     `json:"skipped"`
+	}{v.FolderID, v.Created, uploads, skipped}
 }
 
 // searchFolder is a folder search result with its full path.

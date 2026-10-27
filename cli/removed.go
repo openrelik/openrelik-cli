@@ -41,15 +41,15 @@ func removedFileCmds() []*cobra.Command {
 	return []*cobra.Command{
 		removedCmd("list", "openrelik folder list <FOLDER_ID>",
 			`With --format json, files are now under "files": jq '.files[]'.`, "ls"),
-		removedCmd("upload", "openrelik upload <FILE_PATH>... --folder <FOLDER_ID>", ""),
-		removedCmd("download", "openrelik download --file <ID> [DESTINATION]", ""),
+		removedCmd("upload", "openrelik upload <FILE_PATH>... <FOLDER>", ""),
+		removedCmd("download", "openrelik download <FILE> [DESTINATION]", ""),
 	}
 }
 
 // removedFolderCmds are the 'folder' subcommands replaced by 'upload'.
 func removedFolderCmds() []*cobra.Command {
 	return []*cobra.Command{
-		removedCmd("mirror", "openrelik upload <LOCAL_FOLDER> [--folder <FOLDER_ID>]",
-			"With --folder, LOCAL_FOLDER is created as a subfolder of FOLDER_ID instead of\nits contents being uploaded directly into FOLDER_ID."),
+		removedCmd("mirror", "openrelik upload <LOCAL_FOLDER> [FOLDER]",
+			"With FOLDER, LOCAL_FOLDER is created as a subfolder of FOLDER instead of\nits contents being uploaded directly into FOLDER."),
 	}
 }

@@ -635,7 +635,7 @@ func TestFolderListByPath(t *testing.T) {
 		{
 			name:    "duplicate root names",
 			arg:     "dup/",
-			wantErr: []string{`multiple folders match "dup/"`, "ID", "LOCATION", "\n2 ", "\n3 ", "/dup/", "folder list <ID>"},
+			wantErr: []string{`multiple folders match "dup/"`, "ID", "LOCATION", "\n2 ", "\n3 ", "/dup/", "Use one of the IDs above instead of the path."},
 		},
 		{
 			name:    "duplicate complete paths",

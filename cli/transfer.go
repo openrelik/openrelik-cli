@@ -61,6 +61,9 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 			if maxDepth < 0 {
 				return fmt.Errorf("invalid depth: %d (must be 0 or greater)", maxDepth)
 			}
+			if chunkSize <= 0 {
+				return fmt.Errorf("invalid chunk size: %d (must be greater than 0)", chunkSize)
+			}
 
 			// Check every path up front so nothing is created for a typo.
 			isDir := make([]bool, len(args))

@@ -248,6 +248,7 @@ func TestUploadErrors(t *testing.T) {
 		{name: "unknown folder path", args: []string{a, "--folder", "Case A/nope/"}, wantErr: `no folder named "nope" in /Case A/`},
 		{name: "no paths", args: []string{}, wantErr: "PATH"},
 		{name: "negative depth", args: []string{a, "--depth", "-1"}, wantErr: "invalid depth: -1"},
+		{name: "zero chunk size", args: []string{a, "--chunk-size", "0"}, wantErr: "invalid chunk size: 0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

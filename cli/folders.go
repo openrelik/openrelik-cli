@@ -272,7 +272,7 @@ func ambiguousFolderError(path string, matches []folderMatch) error {
 			m.folder.User.Username, util.FormatTimeAgo(m.folder.UpdatedAt))
 	}
 	tw.Flush()
-	b.WriteString("\nRun 'openrelik folder list <ID>' with one of the IDs above.")
+	b.WriteString("\nUse one of the IDs above instead of the path.")
 	return errors.New(b.String())
 }
 
@@ -412,7 +412,7 @@ same moment can still both create the folder.`,
 
   # Same, using the most recently updated "Case 7" if there are several
   openrelik folder create "Case 7" --exist-ok --latest`,
-		Args: util.UseArgsWithQuoteHint(),
+		Args: util.UseArgsWithQuoteHint("parent"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if latest && !existOK {
 				return fmt.Errorf("--latest can only be used with --exist-ok")

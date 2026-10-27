@@ -78,6 +78,7 @@ func TestUseArgsWithQuoteHint(t *testing.T) {
 		name    string
 		use     string
 		args    []string
+		parent  string // value of --parent, if set
 		wantErr string // empty means no error
 	}{
 		{name: "fits", use: "list [FOLDER]", args: []string{"a b"}},
@@ -94,13 +95,31 @@ func TestUseArgsWithQuoteHint(t *testing.T) {
 			args:    []string{"42", "New", "name"},
 			wantErr: "too many arguments: expected at most 2, got 3\nQuote NAME if it contains spaces: \"New name\"",
 		},
+		{
+			name:    "split may be in a flag value",
+			use:     "create <NAME>",
+			args:    []string{"logs", "A/"},
+			parent:  "Case",
+			wantErr: "too many arguments: expected at most 1, got 2\nQuote NAME and the --parent value if they contain spaces.",
+		},
+		{
+			name:    "unset flag keeps the specific hint",
+			use:     "create <NAME>",
+			args:    []string{"New", "name"},
+			wantErr: "Quote NAME if it contains spaces: \"New name\"",
+		},
 		{name: "missing argument is unchanged", use: "create <NAME>", wantErr: "missing required argument: NAME"},
 		{name: "variadic never too many", use: "upload <PATH> [PATH...]", args: []string{"a", "b", "c"}},
 		{name: "no positional arguments is unchanged", use: "me", args: []string{"x"}, wantErr: "unexpected argument: x"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := UseArgsWithQuoteHint()(&cobra.Command{Use: tt.use}, tt.args)
+			cmd := &cobra.Command{Use: tt.use}
+			cmd.Flags().String("parent", "", "")
+			if tt.parent != "" {
+				cmd.Flags().Set("parent", tt.parent)
+			}
+			err := UseArgsWithQuoteHint("parent")(cmd, tt.args)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)

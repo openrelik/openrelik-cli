@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/openrelik/openrelik-cli/util"
 	openrelik "github.com/openrelik/openrelik-go-client"
@@ -32,8 +34,15 @@ func newFolderCmd() *cobra.Command {
 	return cmd
 }
 
+// folderPageSize is the number of folders requested per API call.
+const folderPageSize = 100
+
 func newListFoldersCmd() *cobra.Command {
-	return &cobra.Command{
+	var limit int
+	var sortBy string
+	var reverse bool
+
+	cmd := &cobra.Command{
 		Use:     "list [PARENT_ID]",
 		Aliases: []string{"ls"},
 		Short:   "List folders",
@@ -41,9 +50,23 @@ func newListFoldersCmd() *cobra.Command {
 
 Without PARENT_ID, lists all root folders. With PARENT_ID, lists the
 direct subfolders of that folder. PARENT_ID is the integer ID shown
-by a previous 'folder list' call.`,
-		Example: `  # List root folders
+by a previous 'folder list' call.
+
+Like 'ls -latr', folders are sorted by last update with the most
+recently updated folder last. Use --sort name to sort by name and
+-r to reverse the sort order. Use --limit N to show only the N most
+recently updated folders, in the selected sort order.`,
+		Example: `  # List all root folders, most recently updated last
   openrelik folder list
+
+  # Most recently updated first
+  openrelik folder list -r
+
+  # Sort by name
+  openrelik folder list --sort name
+
+  # Show the 10 most recently updated root folders
+  openrelik folder list --limit 10
 
   # List subfolders of folder 42
   openrelik folder list 42
@@ -52,6 +75,13 @@ by a previous 'folder list' call.`,
   openrelik folder list --format json`,
 		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if limit < 0 {
+				return fmt.Errorf("invalid limit: %d (must be 0 or greater)", limit)
+			}
+			if sortBy != "time" && sortBy != "name" {
+				return fmt.Errorf("invalid sort: %q (must be time or name)", sortBy)
+			}
+
 			var pID int
 			var err error
 			if len(args) > 0 {
@@ -70,16 +100,72 @@ by a previous 'folder list' call.`,
 			if pID != 0 {
 				folders, _, err = client.Folders().ListSubFolders(cmd.Context(), pID)
 			} else {
-				folders, _, err = client.Folders().ListRootFolders(cmd.Context())
+				folders, err = fetchAllRootFolders(cmd.Context(), client)
 			}
 
 			if err != nil {
 				return err
 			}
 
-			return formatAndPrint(cmd, &FolderListView{Folders: folders})
+			total := len(folders)
+			if limit > 0 && len(folders) > limit {
+				// Keep the most recently updated folders regardless of sort.
+				sortFolders(folders, "time", true)
+				folders = folders[:limit]
+			}
+			sortFolders(folders, sortBy, reverse)
+
+			if err := formatAndPrint(cmd, &FolderListView{Folders: folders}); err != nil {
+				return err
+			}
+			printTruncationHint(cmd, len(folders), total, "folders")
+			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&sortBy, "sort", "time", "Sort by: time (oldest first) or name")
+	cmd.Flags().BoolVarP(&reverse, "reverse", "r", false, "Reverse the sort order")
+	cmd.Flags().IntVar(&limit, "limit", 0, "Show only the N most recently updated folders (0 shows all)")
+	return cmd
+}
+
+// fetchAllRootFolders pages through the root folders endpoint and returns
+// every root folder.
+func fetchAllRootFolders(ctx context.Context, client *openrelik.Client) ([]openrelik.Folder, error) {
+	var folders []openrelik.Folder
+	for page := 1; ; page++ {
+		result, _, err := client.Folders().ListRootFoldersPage(ctx, &openrelik.ListOptions{Page: page, PageSize: folderPageSize})
+		if err != nil {
+			return nil, err
+		}
+		folders = append(folders, result.Folders...)
+		if len(result.Folders) == 0 || len(folders) >= result.TotalCount {
+			return folders, nil
+		}
+	}
+}
+
+// sortFolders sorts folders like 'ls -ltr': by last update with the oldest
+// first, or by name when sortBy is "name". reverse inverts the order. ID
+// breaks ties so the order is stable.
+func sortFolders(folders []openrelik.Folder, sortBy string, reverse bool) {
+	sort.SliceStable(folders, func(i, j int) bool {
+		a, b := folders[i], folders[j]
+		if reverse {
+			a, b = b, a
+		}
+		switch sortBy {
+		case "name":
+			if an, bn := strings.ToLower(a.DisplayName), strings.ToLower(b.DisplayName); an != bn {
+				return an < bn
+			}
+		default:
+			if !a.UpdatedAt.Equal(b.UpdatedAt) {
+				return a.UpdatedAt.Before(b.UpdatedAt)
+			}
+		}
+		return a.ID < b.ID
+	})
 }
 
 func newCreateFolderCmd() *cobra.Command {

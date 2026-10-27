@@ -117,6 +117,15 @@ func formatAndPrint(cmd *cobra.Command, result interface{}) error {
 	}
 }
 
+// printTruncationHint tells the user on stderr that a list was truncated.
+// It is only shown for human output so piped and JSON output stay clean.
+func printTruncationHint(cmd *cobra.Command, shown, total int, noun string) {
+	if quiet || outputFormat != "human" || shown >= total {
+		return
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "\nShowing %d of %d %s. Omit --limit to see all.\n", shown, total, noun)
+}
+
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
 	if err := NewRootCmd().Execute(); err != nil {

@@ -115,7 +115,7 @@ openrelik user me --format json
 
 Organize files in hierarchical directories.
 
-*   `folder list [PARENT_ID]`: List root folders. If you provide a parent ID, list subfolders inside that parent.
+*   `folder list [PARENT_ID]`: List root folders. If you provide a parent ID, list subfolders inside that parent. Lists every folder like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated.
 *   `folder create <NAME>`: Create a new folder. Use `--parent <ID>` to create a subfolder.
 *   `folder mirror <DIR>`: Recreate a local directory structure on the server.
 

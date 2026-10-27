@@ -3,11 +3,11 @@ package cli
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/openrelik/openrelik-cli/util"
 	openrelik "github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 // treeFetchConcurrency is the number of folders whose contents are fetched in
@@ -151,21 +151,12 @@ func (n *treeNode) sort(sortBy string, reverse bool) {
 }
 
 // fetchTreeLevel fetches the contents of every node in level, a few folders
-// at a time.
+// at a time. The first error cancels the fetches still in flight.
 func fetchTreeLevel(ctx context.Context, client *openrelik.Client, level []*treeNode, foldersOnly bool) error {
-	var (
-		mu       sync.Mutex
-		wg       sync.WaitGroup
-		firstErr error
-		sem      = make(chan struct{}, treeFetchConcurrency)
-	)
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(treeFetchConcurrency)
 	for _, n := range level {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-
+		g.Go(func() error {
 			var folders []openrelik.Folder
 			var files []openrelik.FolderFile
 			var err error
@@ -175,20 +166,15 @@ func fetchTreeLevel(ctx context.Context, client *openrelik.Client, level []*tree
 				folders, files, err = fetchFolderContents(ctx, client, n.folder.ID)
 			}
 			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("failed to list folder %d: %w", n.folder.ID, err)
-				}
-				mu.Unlock()
-				return
+				return fmt.Errorf("failed to list folder %d: %w", n.folder.ID, err)
 			}
 			// Each goroutine writes only its own node.
 			if !foldersOnly && files == nil {
 				files = []openrelik.FolderFile{}
 			}
 			n.setContents(folders, files)
-		}()
+			return nil
+		})
 	}
-	wg.Wait()
-	return firstErr
+	return g.Wait()
 }

@@ -57,7 +57,7 @@ func (v *FolderCreatedView) UnwrapJSON() any {
 	}{v.Folder, v.Created}
 }
 
-// UploadView renders the result of 'folder upload': the root folder it
+// UploadView renders the result of 'upload': the root folder it
 // created, if any, and one line per uploaded file.
 type UploadView struct {
 	Created  *openrelik.Folder

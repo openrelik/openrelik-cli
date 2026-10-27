@@ -58,6 +58,10 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 		Args:         util.UseArgs(),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if maxDepth < 0 {
+				return fmt.Errorf("invalid depth: %d (must be 0 or greater)", maxDepth)
+			}
+
 			// Check every path up front so nothing is created for a typo.
 			isDir := make([]bool, len(args))
 			for i, p := range args {
@@ -74,14 +78,15 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 			}
 
 			view := &UploadView{}
+			// A single directory becomes the new root folder itself.
+			single := false
 			if cmd.Flags().Changed("folder") {
 				view.FolderID, err = resolveFolder(cmd.Context(), client, folder)
 				if err != nil {
 					return err
 				}
 			} else {
-				// A single directory becomes the new root folder itself.
-				single := len(args) == 1 && isDir[0]
+				single = len(args) == 1 && isDir[0]
 				if name == "" {
 					name = defaultUploadFolderName(args, isDir, time.Now())
 				}
@@ -91,28 +96,36 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 				}
 				view.Created = created
 				view.FolderID = created.ID
+			}
+
+			upload := func() error {
 				if single {
-					view.Uploads, err = uploadDirContents(cmd.Context(), cmd.ErrOrStderr(), client, args[0], created.ID, 0)
+					view.Uploads, err = uploadDirContents(cmd.Context(), cmd.ErrOrStderr(), client, args[0], view.FolderID, 0)
+					return err
+				}
+				for i, p := range args {
+					var uploads []uploadedFile
+					if isDir[i] {
+						uploads, err = uploadDir(cmd.Context(), cmd.ErrOrStderr(), client, p, view.FolderID)
+					} else {
+						var file *openrelik.File
+						file, err = uploadFileWithProgress(cmd.Context(), cmd.ErrOrStderr(), client, p, view.FolderID)
+						uploads = []uploadedFile{{File: file, FolderID: view.FolderID}}
+					}
 					if err != nil {
 						return err
 					}
-					return formatAndPrint(cmd, view)
+					view.Uploads = append(view.Uploads, uploads...)
 				}
+				return nil
 			}
-
-			for i, p := range args {
-				var uploads []uploadedFile
-				if isDir[i] {
-					uploads, err = uploadDir(cmd.Context(), cmd.ErrOrStderr(), client, p, view.FolderID)
-				} else {
-					var file *openrelik.File
-					file, err = uploadFileWithProgress(cmd.Context(), cmd.ErrOrStderr(), client, p, view.FolderID)
-					uploads = []uploadedFile{{File: file, FolderID: view.FolderID}}
+			if err := upload(); err != nil {
+				// The view is never printed, so say where the partial upload went.
+				if view.Created != nil {
+					return fmt.Errorf("%w\n\nFolder %q (ID %d) was created and holds the files uploaded before the error.",
+						err, view.Created.DisplayName, view.Created.ID)
 				}
-				if err != nil {
-					return err
-				}
-				view.Uploads = append(view.Uploads, uploads...)
+				return err
 			}
 			return formatAndPrint(cmd, view)
 		},
@@ -130,9 +143,18 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 // a single directory keeps its own name, anything else gets a timestamp.
 func defaultUploadFolderName(paths []string, isDir []bool, now time.Time) string {
 	if len(paths) == 1 && isDir[0] {
-		return filepath.Base(filepath.Clean(paths[0]))
+		return localDirName(paths[0])
 	}
 	return "Upload " + now.Format("2006-01-02 15:04")
+}
+
+// localDirName returns the name of the directory at path, resolving "." and
+// ".." so that 'upload .' uses the directory's real name.
+func localDirName(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Base(path)
 }
 
 // uploadedFile is a file uploaded by 'upload' and the folder it went to.
@@ -144,7 +166,7 @@ type uploadedFile struct {
 // uploadDir recreates localPath as a subfolder of remoteFolderID and uploads
 // its contents into it.
 func uploadDir(ctx context.Context, out io.Writer, client *openrelik.Client, localPath string, remoteFolderID int) ([]uploadedFile, error) {
-	dirName := filepath.Base(filepath.Clean(localPath))
+	dirName := localDirName(localPath)
 	folder, _, err := client.Folders().CreateSubFolder(ctx, remoteFolderID, dirName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create subfolder %s: %w", dirName, err)

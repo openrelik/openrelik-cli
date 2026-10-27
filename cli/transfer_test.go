@@ -65,6 +65,10 @@ func newUploadServer(t *testing.T) *uploadServer {
 		switch {
 		case r.URL.Path == "/api/v1/files/upload":
 			name := r.URL.Query().Get("resumableFilename")
+			if name == "fail.txt" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			s.uploads[name] = r.URL.Query().Get("folder_id")
 			fmt.Fprintf(w, `{"id": 900, "display_name": %q}`, name)
 		case r.URL.Path == "/api/v1/folders/" || strings.HasSuffix(r.URL.Path, "/folders/"):
@@ -243,6 +247,7 @@ func TestUploadErrors(t *testing.T) {
 		{name: "invalid folder ID", args: []string{a, "--folder", "0"}, wantErr: "invalid folder ID"},
 		{name: "unknown folder path", args: []string{a, "--folder", "Case A/nope/"}, wantErr: `no folder named "nope" in /Case A/`},
 		{name: "no paths", args: []string{}, wantErr: "PATH"},
+		{name: "negative depth", args: []string{a, "--depth", "-1"}, wantErr: "invalid depth: -1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -258,6 +263,41 @@ func TestUploadErrors(t *testing.T) {
 					server.roots, server.subfolders, server.uploads)
 			}
 		})
+	}
+}
+
+func TestUploadPartialFailureNamesCreatedFolder(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt", "fail.txt")
+	server := newUploadServer(t)
+	defer server.Close()
+
+	_, err := runUpload(t, server, filepath.Join(loose, "a.txt"), filepath.Join(loose, "fail.txt"), "--name", "Case")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	want := `Folder "Case" (ID 501) was created and holds the files uploaded before the error.`
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("expected error to contain %q, got %q", want, err.Error())
+	}
+	if server.uploads["a.txt"] != "501" {
+		t.Errorf("a.txt should be uploaded before the failure, got %v", server.uploads)
+	}
+}
+
+func TestUploadDotUsesDirectoryName(t *testing.T) {
+	evidence := writeTree(t, "evidence", "disk.E01")
+	t.Chdir(evidence)
+
+	for _, args := range [][]string{{"."}, {".", "--folder", "42"}} {
+		server := newUploadServer(t)
+		if _, err := runUpload(t, server, args...); err != nil {
+			t.Fatalf("%v: Execute() failed: %v", args, err)
+		}
+		created := append(server.roots, server.subfolders...)
+		if len(created) != 1 || !strings.HasSuffix(created[0], "evidence") {
+			t.Errorf("%v: created folders %q, want one named evidence", args, created)
+		}
+		server.Close()
 	}
 }
 
@@ -298,6 +338,7 @@ func TestDefaultUploadFolderName(t *testing.T) {
 		want  string
 	}{
 		{[]string{"./evidence/"}, []bool{true}, "evidence"},
+		{[]string{"/cases/evidence/logs/.."}, []bool{true}, "evidence"},
 		{[]string{"/cases/disk.E01"}, []bool{false}, "Upload 2026-10-27 14:05"},
 		{[]string{"a", "b"}, []bool{true, true}, "Upload 2026-10-27 14:05"},
 	}
@@ -488,7 +529,7 @@ func TestDownloadArgErrors(t *testing.T) {
 		{name: "zero file ID", args: []string{"download", "--file", "0"}, wantErr: "invalid file ID: 0"},
 		{name: "non-numeric file ID", args: []string{"download", "--file", "abc"}, wantErr: `invalid argument "abc"`},
 		{name: "two destinations", args: []string{"download", "--file", "1", "a", "b"}, wantErr: "too many arguments"},
-		{name: "old file download is gone", args: []string{"file", "download", "1"}, wantErr: `unknown command "download" for "openrelik file"`},
+		{name: "old file download points to download", args: []string{"file", "download", "1"}, wantErr: "openrelik download --file <ID>"},
 		{name: "old folder upload is gone", args: []string{"folder", "upload", "x"}, wantErr: `unknown command "upload" for "openrelik folder"`},
 	}
 	for _, tt := range tests {

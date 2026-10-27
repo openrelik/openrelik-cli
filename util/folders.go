@@ -110,3 +110,16 @@ func FindOrCreateFolder(ctx context.Context, client *openrelik.Client, parentID 
 	}
 	return folder, true, nil
 }
+
+// LatestFolder returns the most recently updated of folders, preferring the
+// higher (newer) ID when update times are equal. folders must not be empty.
+func LatestFolder(folders []openrelik.Folder) *openrelik.Folder {
+	latest := &folders[0]
+	for i := range folders[1:] {
+		f := &folders[i+1]
+		if f.UpdatedAt.After(latest.UpdatedAt) || (f.UpdatedAt.Equal(latest.UpdatedAt) && f.ID > latest.ID) {
+			latest = f
+		}
+	}
+	return latest
+}

@@ -69,12 +69,13 @@ func IsTerminalTaskStatus(status string) bool {
 }
 
 // GetOrCreateFolder returns the user's root folder named folderName,
-// creating it if needed. If several exist, the first is used.
+// creating it if needed. If several exist, the most recently updated is
+// used, as with 'folder create --exist-ok --latest'.
 func GetOrCreateFolder(ctx context.Context, client *openrelik.Client, folderName string) (*openrelik.Folder, error) {
 	folder, _, err := FindOrCreateFolder(ctx, client, 0, folderName)
 	var multiple *MultipleFoldersError
 	if errors.As(err, &multiple) {
-		return &multiple.Matches[0], nil
+		return LatestFolder(multiple.Matches), nil
 	}
 	return folder, err
 }

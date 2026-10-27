@@ -16,6 +16,7 @@ import (
 	"github.com/openrelik/openrelik-cli/util"
 	openrelik "github.com/openrelik/openrelik-go-client"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 func newFolderCmd() *cobra.Command {
@@ -30,6 +31,7 @@ func newFolderCmd() *cobra.Command {
 	cmd.AddCommand(newCreateFolderCmd())
 	cmd.AddCommand(newSearchFoldersCmd())
 	cmd.AddCommand(newTreeFoldersCmd())
+	cmd.AddCommand(removedFolderCmds()...)
 	return cmd
 }
 
@@ -412,13 +414,13 @@ same moment can still both create the folder.`,
   openrelik folder create "Case 7" --exist-ok --latest`,
 		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if latest && !existOK {
+				return fmt.Errorf("--latest can only be used with --exist-ok")
+			}
+
 			client, err := newClient()
 			if err != nil {
 				return err
-			}
-
-			if latest && !existOK {
-				return fmt.Errorf("--latest can only be used with --exist-ok")
 			}
 
 			name := args[0]
@@ -440,7 +442,7 @@ same moment can still both create the folder.`,
 					if !latest {
 						return existingFoldersError(multiple)
 					}
-					folder, err = latestFolder(multiple.Matches), nil
+					folder, err = util.LatestFolder(multiple.Matches), nil
 					if !quiet && outputFormat == "human" {
 						fmt.Fprintf(cmd.ErrOrStderr(), "%d folders named %q exist; using the most recently updated.\n",
 							len(multiple.Matches), name)
@@ -464,19 +466,6 @@ same moment can still both create the folder.`,
 	cmd.Flags().BoolVar(&existOK, "exist-ok", false, "If a folder with this name already exists here, print it instead of creating a duplicate")
 	cmd.Flags().BoolVar(&latest, "latest", false, "With --exist-ok, use the most recently updated folder if several exist")
 	return cmd
-}
-
-// latestFolder returns the most recently updated folder, preferring the
-// higher (newer) ID when update times are equal.
-func latestFolder(folders []openrelik.Folder) *openrelik.Folder {
-	latest := &folders[0]
-	for i := range folders[1:] {
-		f := &folders[i+1]
-		if f.UpdatedAt.After(latest.UpdatedAt) || (f.UpdatedAt.Equal(latest.UpdatedAt) && f.ID > latest.ID) {
-			latest = f
-		}
-	}
-	return latest
 }
 
 // existingFoldersError lists the folders that made 'folder create
@@ -636,36 +625,27 @@ func fetchFolderSearch(ctx context.Context, client *openrelik.Client, term strin
 }
 
 // fetchFolderPaths looks up the full path of each folder entry, keyed by
-// folder ID, running a few lookups at a time.
+// folder ID, running a few lookups at a time. The first error cancels the
+// lookups still in flight.
 func fetchFolderPaths(ctx context.Context, client *openrelik.Client, entries []listEntry) (map[int]string, error) {
-	var (
-		mu       sync.Mutex
-		wg       sync.WaitGroup
-		firstErr error
-		paths    = make(map[int]string, len(entries))
-		sem      = make(chan struct{}, searchPathConcurrency)
-	)
+	var mu sync.Mutex
+	paths := make(map[int]string, len(entries))
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(searchPathConcurrency)
 	for _, e := range entries {
 		id := e.folder.ID
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
+		g.Go(func() error {
 			folder, _, err := client.Folders().Get(ctx, id)
-			mu.Lock()
-			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("failed to look up folder %d: %w", id, err)
-				}
-				return
+				return fmt.Errorf("failed to look up folder %d: %w", id, err)
 			}
+			mu.Lock()
 			paths[id] = folderPath(folder)
-		}()
+			mu.Unlock()
+			return nil
+		})
 	}
-	wg.Wait()
-	return paths, firstErr
+	return paths, g.Wait()
 }
 
 // folderPath builds a folder's path, like "/Case A/evidence/", from its

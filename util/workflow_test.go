@@ -62,9 +62,9 @@ func TestGetOrCreateFolder(t *testing.T) {
 		{name: "creates when missing", folders: `{"id": 1, "display_name": "other", "user": {"id": 7}}`, wantID: 2, created: true},
 		{name: "ignores folders shared by others", folders: `{"id": 1, "display_name": "uploads", "user": {"id": 8}}`, wantID: 2, created: true},
 		{
-			name:    "duplicates use the first",
-			folders: `{"id": 1, "display_name": "uploads", "user": {"id": 7}}, {"id": 3, "display_name": "uploads", "user": {"id": 7}}`,
-			wantID:  1,
+			name:    "duplicates use the most recently updated",
+			folders: `{"id": 1, "display_name": "uploads", "user": {"id": 7}, "updated_at": "2026-01-01T00:00:00Z"}, {"id": 3, "display_name": "uploads", "user": {"id": 7}, "updated_at": "2026-02-01T00:00:00Z"}`,
+			wantID:  3,
 		},
 	}
 	for _, tt := range tests {

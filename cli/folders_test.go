@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openrelik/openrelik-cli/config"
 	openrelik "github.com/openrelik/openrelik-go-client"
 )
 
@@ -1057,6 +1058,25 @@ func TestFolderCreateExistOK(t *testing.T) {
 	}
 }
 
+// A flag mistake is reported before credentials are looked up, so it isn't
+// hidden behind a missing-credentials error.
+func TestFolderCreateLatestCheckedBeforeCredentials(t *testing.T) {
+	config.SetBaseDir(t.TempDir())
+	defer config.SetBaseDir("")
+	t.Setenv("OPENRELIK_API_KEY", "")
+	t.Setenv("OPENRELIK_SERVER_URL", "")
+
+	root := NewRootCmd()
+	root.SetOut(new(bytes.Buffer))
+	root.SetErr(new(bytes.Buffer))
+	root.SetIn(new(bytes.Buffer))
+	root.SetArgs([]string{"folder", "create", "Dup", "--latest"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--latest can only be used with --exist-ok") {
+		t.Fatalf("expected the --latest error, got %v", err)
+	}
+}
+
 func TestFolderCreateJSONReportsCreated(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -1114,24 +1134,6 @@ func TestFolderCreateLatestNote(t *testing.T) {
 			t.Errorf("%v: note shown = %v, want %v (stderr %q)", tt.args, hasNote, tt.wantNote, stderr.String())
 		}
 		server.Close()
-	}
-}
-
-func TestLatestFolder(t *testing.T) {
-	at := func(day int) time.Time { return time.Date(2026, 1, day, 0, 0, 0, 0, time.UTC) }
-	tests := []struct {
-		name    string
-		folders []openrelik.Folder
-		want    int
-	}{
-		{"newest update wins over higher ID", []openrelik.Folder{{ID: 1, UpdatedAt: at(3)}, {ID: 2, UpdatedAt: at(2)}}, 1},
-		{"newest update anywhere in the list", []openrelik.Folder{{ID: 1, UpdatedAt: at(1)}, {ID: 2, UpdatedAt: at(1)}, {ID: 3, UpdatedAt: at(5)}}, 3},
-		{"tie goes to the higher ID", []openrelik.Folder{{ID: 9, UpdatedAt: at(1)}, {ID: 4, UpdatedAt: at(1)}}, 9},
-	}
-	for _, tt := range tests {
-		if got := latestFolder(tt.folders).ID; got != tt.want {
-			t.Errorf("%s: got %d, want %d", tt.name, got, tt.want)
-		}
 	}
 }
 

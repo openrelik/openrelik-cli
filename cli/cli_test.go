@@ -122,7 +122,11 @@ func TestUnknownSubcommand(t *testing.T) {
 		wantOutput string
 	}{
 		{name: "unknown root command", args: []string{"bogus"}, wantErr: []string{`unknown command "bogus" for "openrelik"`}},
-		{name: "unknown group subcommand", args: []string{"file", "ls", "42"}, wantErr: []string{`unknown command "ls" for "openrelik file"`, "Run 'openrelik file --help' for usage."}},
+		{name: "unknown group subcommand", args: []string{"file", "bogus", "42"}, wantErr: []string{`unknown command "bogus" for "openrelik file"`, "Run 'openrelik file --help' for usage."}},
+		{name: "removed file list", args: []string{"file", "ls", "42", "--format", "json"}, wantErr: []string{"'openrelik file list' was removed", "openrelik folder list <FOLDER_ID>", ".files[]"}},
+		{name: "removed file upload", args: []string{"files", "upload", "a.txt", "42", "--chunk-size", "8"}, wantErr: []string{"'openrelik file upload' was removed", "openrelik upload <FILE_PATH>... --folder <FOLDER_ID>"}},
+		{name: "removed file download", args: []string{"file", "download", "123"}, wantErr: []string{"'openrelik file download' was removed", "openrelik download --file <ID>"}},
+		{name: "removed folder mirror", args: []string{"folder", "mirror", "./evidence", "42"}, wantErr: []string{"'openrelik folder mirror' was removed", "openrelik upload <LOCAL_FOLDER>", "created as a subfolder"}},
 		{name: "suggests close match", args: []string{"folder", "lst"}, wantErr: []string{"Did you mean this?", "list"}},
 		{name: "run without workers", args: []string{"run", "strings"}, wantErr: []string{`unknown command "strings" for "openrelik run"`}},
 		{name: "bare group shows help", args: []string{"file"}, wantOutput: "Usage:"},

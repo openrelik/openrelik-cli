@@ -9,12 +9,14 @@ import (
 
 func newFileCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "file",
-		Short: "Manage files",
-		Long:  `Inspect files stored in OpenRelik.`,
+		Use:     "file",
+		Aliases: []string{"files"},
+		Short:   "Manage files",
+		Long:    `Inspect files stored in OpenRelik.`,
 	}
 
 	cmd.AddCommand(newFileInfoCmd())
+	cmd.AddCommand(removedFileCmds()...)
 	return cmd
 }
 

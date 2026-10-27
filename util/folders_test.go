@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openrelik/openrelik-go-client"
 )
@@ -167,5 +168,23 @@ func TestFindOrCreateFolder(t *testing.T) {
 				t.Errorf("created folders %v, want %v", created, tt.wantCreated)
 			}
 		})
+	}
+}
+
+func TestLatestFolder(t *testing.T) {
+	at := func(day int) time.Time { return time.Date(2026, 1, day, 0, 0, 0, 0, time.UTC) }
+	tests := []struct {
+		name    string
+		folders []openrelik.Folder
+		want    int
+	}{
+		{"newest update wins over higher ID", []openrelik.Folder{{ID: 1, UpdatedAt: at(3)}, {ID: 2, UpdatedAt: at(2)}}, 1},
+		{"newest update anywhere in the list", []openrelik.Folder{{ID: 1, UpdatedAt: at(1)}, {ID: 2, UpdatedAt: at(1)}, {ID: 3, UpdatedAt: at(5)}}, 3},
+		{"tie goes to the higher ID", []openrelik.Folder{{ID: 9, UpdatedAt: at(1)}, {ID: 4, UpdatedAt: at(1)}}, 9},
+	}
+	for _, tt := range tests {
+		if got := LatestFolder(tt.folders).ID; got != tt.want {
+			t.Errorf("%s: got %d, want %d", tt.name, got, tt.want)
+		}
 	}
 }

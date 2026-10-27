@@ -44,8 +44,7 @@ fetch. Use --size to show file sizes.`,
 
   # Show only the folder structure of all root folders
   openrelik folder tree --folders-only`,
-		Args:         util.UseArgsWithQuoteHint(),
-		SilenceUsage: true,
+		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := opts.validate(); err != nil {
 				return err

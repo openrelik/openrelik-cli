@@ -546,3 +546,134 @@ func TestDownloadArgErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestLocalFileName(t *testing.T) {
+	tests := []struct {
+		displayName string
+		want        string // empty means an error
+	}{
+		{"report.pdf", "report.pdf"},
+		{"../../.bashrc", ".bashrc"},
+		{"/usr/bin/ls", "ls"},
+		{"evidence/logs/syslog", "syslog"},
+		{"..", ""},
+		{".", ""},
+		{"/", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got, err := localFileName(tt.displayName)
+		if tt.want == "" {
+			if err == nil {
+				t.Errorf("localFileName(%q) = %q, want an error", tt.displayName, got)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("localFileName(%q) = %q, %v; want %q", tt.displayName, got, err, tt.want)
+		}
+	}
+}
+
+// TestDownloadStaysInDirectory checks that a hostile display name from the
+// server can't make 'download' write outside the current or given directory.
+func TestDownloadStaysInDirectory(t *testing.T) {
+	var displayName string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/files/789":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id": 789, "display_name": %q, "filesize": 6}`, displayName)
+		case "/api/v1/files/789/download":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			fmt.Fprint(w, "PWNED\n")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+	// base/work is the working directory and base/out a download directory;
+	// base/outside.txt must never be written.
+	base := t.TempDir()
+	work, outDir := filepath.Join(base, "work"), filepath.Join(base, "out")
+	outside := filepath.Join(base, "outside.txt")
+	for _, d := range []string{work, outDir} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(work)
+
+	tests := []struct {
+		name        string
+		displayName string
+		args        []string
+		setup       func(t *testing.T) // runs in work before the download
+		wantFile    string             // path that should hold the download
+		wantErr     string
+	}{
+		{name: "parent directory name", displayName: "../outside.txt", wantFile: filepath.Join(work, "outside.txt")},
+		{name: "absolute name", displayName: outside, wantFile: filepath.Join(work, "outside.txt")},
+		{name: "parent directory name into directory", displayName: "../outside.txt", args: []string{outDir}, wantFile: filepath.Join(outDir, "outside.txt")},
+		{name: "dot dot", displayName: "..", wantErr: `name ".." can't be used as a local file name; give DESTINATION`},
+		{name: "root", displayName: "/", wantErr: "can't be used as a local file name"},
+		{name: "empty", displayName: "", wantErr: "can't be used as a local file name"},
+		{
+			name:        "existing symlink is not followed",
+			displayName: "link.txt",
+			setup: func(t *testing.T) {
+				os.WriteFile(outside, []byte("original"), 0o644)
+				os.Symlink(outside, "link.txt")
+			},
+			wantErr: `"link.txt" is a symlink; refusing to write through it`,
+		},
+		{
+			name:        "dangling symlink is not followed",
+			displayName: "dangling.txt",
+			setup:       func(t *testing.T) { os.Symlink(outside, "dangling.txt") },
+			wantErr:     "is a symlink",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, d := range []string{work, outDir} {
+				entries, _ := os.ReadDir(d)
+				for _, e := range entries {
+					os.Remove(filepath.Join(d, e.Name()))
+				}
+			}
+			os.Remove(outside)
+			if tt.setup != nil {
+				tt.setup(t)
+			}
+			before, _ := os.ReadFile(outside)
+			displayName = tt.displayName
+
+			root := NewRootCmd()
+			root.SetOut(new(bytes.Buffer))
+			root.SetErr(new(bytes.Buffer))
+			root.SetIn(strings.NewReader("y\n"))
+			root.SetArgs(append([]string{"download", "--file", "789", "-q"}, tt.args...))
+			err := root.Execute()
+
+			if after, _ := os.ReadFile(outside); string(after) != string(before) {
+				t.Errorf("%s was written: %q", outside, after)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if got, _ := os.ReadFile(tt.wantFile); string(got) != "PWNED\n" {
+				t.Errorf("expected the download in %s, got %q", tt.wantFile, got)
+			}
+		})
+	}
+}

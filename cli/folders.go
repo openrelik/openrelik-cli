@@ -522,8 +522,7 @@ folder: your root folders and folders shared with you.`,
 
   # Print the IDs of matching folders
   openrelik folder search evidence --format json | jq '.[].id'`,
-		Args:         util.UseArgsWithQuoteHint(),
-		SilenceUsage: true,
+		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := opts.validate(); err != nil {
 				return err

@@ -15,14 +15,10 @@ import (
 
 // Top-level commands that move data between the local machine and OpenRelik.
 
-var (
-	chunkSize int
-	maxDepth  int
-)
-
 func newUploadCmd() *cobra.Command {
 	var folder string
 	var name string
+	var chunkSize, maxDepth int
 
 	cmd := &cobra.Command{
 		Use:   "upload <PATH> [PATH...]",
@@ -55,8 +51,7 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 
   # Use a larger chunk size (bytes) for fast networks
   openrelik upload large.bin --folder 42 --chunk-size 8388608`,
-		Args:         util.UseArgs(),
-		SilenceUsage: true,
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if maxDepth < 0 {
 				return fmt.Errorf("invalid depth: %d (must be 0 or greater)", maxDepth)
@@ -80,6 +75,7 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 				return err
 			}
 
+			up := &uploader{client: client, out: cmd.ErrOrStderr(), chunkSize: chunkSize, maxDepth: maxDepth}
 			view := &UploadView{}
 			// A single directory becomes the new root folder itself.
 			single := false
@@ -103,16 +99,16 @@ time, e.g. "Upload 2026-10-27 14:05". Use --name to choose the name.`,
 
 			upload := func() error {
 				if single {
-					view.Uploads, err = uploadDirContents(cmd.Context(), cmd.ErrOrStderr(), client, args[0], view.FolderID, 0)
+					view.Uploads, err = up.uploadDirContents(cmd.Context(), args[0], view.FolderID, 0)
 					return err
 				}
 				for i, p := range args {
 					var uploads []uploadedFile
 					if isDir[i] {
-						uploads, err = uploadDir(cmd.Context(), cmd.ErrOrStderr(), client, p, view.FolderID)
+						uploads, err = up.uploadDir(cmd.Context(), p, view.FolderID)
 					} else {
 						var file *openrelik.File
-						file, err = uploadFileWithProgress(cmd.Context(), cmd.ErrOrStderr(), client, p, view.FolderID)
+						file, err = up.uploadFile(cmd.Context(), p, view.FolderID)
 						uploads = []uploadedFile{{File: file, FolderID: view.FolderID}}
 					}
 					if err != nil {
@@ -166,20 +162,29 @@ type uploadedFile struct {
 	FolderID int             `json:"folder_id"`
 }
 
+// uploader uploads local files and directories with the settings of one
+// 'upload' run.
+type uploader struct {
+	client    *openrelik.Client
+	out       io.Writer // where progress is shown
+	chunkSize int
+	maxDepth  int
+}
+
 // uploadDir recreates localPath as a subfolder of remoteFolderID and uploads
 // its contents into it.
-func uploadDir(ctx context.Context, out io.Writer, client *openrelik.Client, localPath string, remoteFolderID int) ([]uploadedFile, error) {
+func (u *uploader) uploadDir(ctx context.Context, localPath string, remoteFolderID int) ([]uploadedFile, error) {
 	dirName := localDirName(localPath)
-	folder, _, err := client.Folders().CreateSubFolder(ctx, remoteFolderID, dirName)
+	folder, _, err := u.client.Folders().CreateSubFolder(ctx, remoteFolderID, dirName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create subfolder %s: %w", dirName, err)
 	}
-	return uploadDirContents(ctx, out, client, localPath, folder.ID, 0)
+	return u.uploadDirContents(ctx, localPath, folder.ID, 0)
 }
 
 // uploadDirContents uploads the contents of localPath into remoteFolderID, recreating
-// subdirectories as subfolders up to maxDepth levels deep.
-func uploadDirContents(ctx context.Context, out io.Writer, client *openrelik.Client, localPath string, remoteFolderID int, depth int) ([]uploadedFile, error) {
+// subdirectories as subfolders up to u.maxDepth levels deep.
+func (u *uploader) uploadDirContents(ctx context.Context, localPath string, remoteFolderID int, depth int) ([]uploadedFile, error) {
 	entries, err := os.ReadDir(localPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read directory %s: %w", localPath, err)
@@ -189,20 +194,20 @@ func uploadDirContents(ctx context.Context, out io.Writer, client *openrelik.Cli
 	for _, entry := range entries {
 		entryPath := filepath.Join(localPath, entry.Name())
 		if entry.IsDir() {
-			if depth >= maxDepth {
+			if depth >= u.maxDepth {
 				continue
 			}
-			folder, _, err := client.Folders().CreateSubFolder(ctx, remoteFolderID, entry.Name())
+			folder, _, err := u.client.Folders().CreateSubFolder(ctx, remoteFolderID, entry.Name())
 			if err != nil {
 				return nil, fmt.Errorf("failed to create subfolder %s: %w", entry.Name(), err)
 			}
-			sub, err := uploadDirContents(ctx, out, client, entryPath, folder.ID, depth+1)
+			sub, err := u.uploadDirContents(ctx, entryPath, folder.ID, depth+1)
 			if err != nil {
 				return nil, err
 			}
 			uploads = append(uploads, sub...)
 		} else {
-			file, err := uploadFileWithProgress(ctx, out, client, entryPath, remoteFolderID)
+			file, err := u.uploadFile(ctx, entryPath, remoteFolderID)
 			if err != nil {
 				return nil, err
 			}
@@ -224,7 +229,11 @@ func newDownloadCmd() *cobra.Command {
 be a file path or an existing directory; if a directory is given, the
 original filename is used inside it.
 If DESTINATION is omitted, the file is saved to the current directory using
-its original filename. You will be prompted before overwriting an existing file.`,
+its original filename. You will be prompted before overwriting an existing file.
+
+The original filename never places the file outside the current or given
+directory: any directories in it are dropped, and existing symlinks are not
+followed. If the name can't be used, give DESTINATION as a file path.`,
 		Example: `  # Download to current directory (original filename)
   openrelik download --file 123
 
@@ -233,8 +242,7 @@ its original filename. You will be prompted before overwriting an existing file.
 
   # Download into a directory (uses original filename)
   openrelik download --file 123 ./output/`,
-		Args:         util.UseArgs(),
-		SilenceUsage: true,
+		Args: util.UseArgs(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if fileID <= 0 {
 				return fmt.Errorf("invalid file ID: %d", fileID)
@@ -251,14 +259,22 @@ its original filename. You will be prompted before overwriting an existing file.
 				return err
 			}
 
-			// Determine destination path
-			destPath := file.DisplayName
+			// Determine destination path. Unless the user gave a file path,
+			// the name comes from the server and must stay inside the
+			// current or given directory.
+			var destPath string
+			nameFromServer := true
 			if len(args) > 0 {
 				destPath = args[0]
 				info, err := os.Stat(destPath)
-				if err == nil && info.IsDir() {
-					destPath = filepath.Join(destPath, file.DisplayName)
+				nameFromServer = err == nil && info.IsDir()
+			}
+			if nameFromServer {
+				name, err := localFileName(file.DisplayName)
+				if err != nil {
+					return fmt.Errorf("file %d: %w; give DESTINATION as a file path to choose where to save it", fileID, err)
 				}
+				destPath = filepath.Join(destPath, name)
 			}
 
 			// Check if folder exists
@@ -267,8 +283,14 @@ its original filename. You will be prompted before overwriting an existing file.
 				return fmt.Errorf("destination folder %q does not exist", parentDir)
 			}
 
-			// Check for overwrite
-			if _, err := os.Stat(destPath); err == nil {
+			// Check for overwrite. Lstat so a symlink at a server-chosen
+			// name can't redirect the download elsewhere.
+			exists := false
+			if info, err := os.Lstat(destPath); err == nil {
+				if nameFromServer && info.Mode()&os.ModeSymlink != 0 {
+					return fmt.Errorf("%q is a symlink; refusing to write through it", destPath)
+				}
+				exists = true
 				confirmed, err := util.Confirm(cmd.OutOrStdout(), cmd.InOrStdin(), fmt.Sprintf("File %q already exists. Overwrite?", destPath))
 				if err != nil {
 					return err
@@ -285,7 +307,13 @@ its original filename. You will be prompted before overwriting an existing file.
 			}
 			defer body.Close()
 
-			out, err := os.Create(destPath)
+			// O_EXCL makes creating a new file fail if something, such as a
+			// symlink, appeared at destPath since the check above.
+			flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+			if !exists {
+				flags |= os.O_EXCL
+			}
+			out, err := os.OpenFile(destPath, flags, 0o666)
 			if err != nil {
 				return err
 			}
@@ -310,10 +338,20 @@ its original filename. You will be prompted before overwriting an existing file.
 	return cmd
 }
 
-// uploadFileWithProgress uploads a single local file to the given folder,
-// showing a progress tracker if quiet mode is off. It uses the package-level
-// chunkSize variable for chunked uploads.
-func uploadFileWithProgress(ctx context.Context, out io.Writer, client *openrelik.Client, filePath string, folderID int) (*openrelik.File, error) {
+// localFileName turns a file's display name from the server into a single
+// local file name, dropping any directories so that a name such as
+// "../../.bashrc" or "/usr/bin/ls" can't write outside the target directory.
+func localFileName(displayName string) (string, error) {
+	name := filepath.Base(displayName)
+	if name == "." || !filepath.IsLocal(name) {
+		return "", fmt.Errorf("name %q can't be used as a local file name", displayName)
+	}
+	return name, nil
+}
+
+// uploadFile uploads a single local file to the given folder in chunks of
+// u.chunkSize, showing a progress tracker if quiet mode is off.
+func (u *uploader) uploadFile(ctx context.Context, filePath string, folderID int) (*openrelik.File, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
@@ -330,9 +368,9 @@ func uploadFileWithProgress(ctx context.Context, out io.Writer, client *openreli
 
 	var tracker *util.ProgressTracker
 	if !quiet {
-		tracker = util.NewProgressTracker(out, fileInfo.Size(), "Upload: "+filepath.Base(filePath))
-		totalChunks := int(fileInfo.Size() / int64(chunkSize))
-		if fileInfo.Size()%int64(chunkSize) != 0 {
+		tracker = util.NewProgressTracker(u.out, fileInfo.Size(), "Upload: "+filepath.Base(filePath))
+		totalChunks := int(fileInfo.Size() / int64(u.chunkSize))
+		if fileInfo.Size()%int64(u.chunkSize) != 0 {
 			totalChunks++
 		}
 		if totalChunks == 0 {
@@ -342,14 +380,14 @@ func uploadFileWithProgress(ctx context.Context, out io.Writer, client *openreli
 	}
 
 	opts := []openrelik.UploadOption{
-		openrelik.WithChunkSize(chunkSize),
+		openrelik.WithChunkSize(u.chunkSize),
 	}
 
 	lastChunkNum := 0
 	if tracker != nil {
 		opts = append(opts, openrelik.WithUploadProgress(func(bytesSent, totalBytes int64) {
-			currentChunk := int(bytesSent / int64(chunkSize))
-			if bytesSent%int64(chunkSize) != 0 {
+			currentChunk := int(bytesSent / int64(u.chunkSize))
+			if bytesSent%int64(u.chunkSize) != 0 {
 				currentChunk++
 			}
 			if currentChunk > lastChunkNum {
@@ -365,7 +403,7 @@ func uploadFileWithProgress(ctx context.Context, out io.Writer, client *openreli
 		}))
 	}
 
-	result, _, err := client.Files().Upload(ctx, folderID, filepath.Base(filePath), file, opts...)
+	result, _, err := u.client.Files().Upload(ctx, folderID, filepath.Base(filePath), file, opts...)
 	if tracker != nil {
 		tracker.Finish()
 	}

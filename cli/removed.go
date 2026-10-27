@@ -11,13 +11,20 @@ import (
 // fails with the command to use instead, so old scripts get a clear error
 // rather than "unknown command". note adds anything that behaves differently.
 func removedCmd(use, replacement, note string, aliases ...string) *cobra.Command {
+	// 'openrelik help <command>' doesn't run RunE, so the help text carries
+	// the same notice.
+	long := "This command was removed. Use instead:\n\n  " + replacement
+	if note != "" {
+		long += "\n\n" + note
+	}
 	return &cobra.Command{
 		Use:     use,
 		Aliases: aliases,
+		Short:   "Removed; use '" + replacement + "'",
+		Long:    long,
 		Hidden:  true,
 		// Accept the old command's flags, such as --chunk-size.
 		DisableFlagParsing: true,
-		SilenceUsage:       true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			msg := fmt.Sprintf("'%s' was removed. Use instead:\n\n  %s", cmd.CommandPath(), replacement)
 			if note != "" {

@@ -130,6 +130,7 @@ func TestUnknownSubcommand(t *testing.T) {
 		{name: "suggests close match", args: []string{"folder", "lst"}, wantErr: []string{"Did you mean this?", "list"}},
 		{name: "run without workers", args: []string{"run", "strings"}, wantErr: []string{`unknown command "strings" for "openrelik run"`}},
 		{name: "bare group shows help", args: []string{"file"}, wantOutput: "Usage:"},
+		{name: "help for removed command shows the notice", args: []string{"help", "folder", "mirror"}, wantOutput: "This command was removed. Use instead:\n\n  openrelik upload <LOCAL_FOLDER>"},
 		{name: "bare root shows help", args: []string{}, wantOutput: "Usage:"},
 	}
 

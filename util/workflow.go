@@ -98,6 +98,19 @@ type WorkflowMonitor struct {
 	mu                sync.Mutex
 }
 
+// WorkflowFailedError is returned by WorkflowMonitor.Monitor when the
+// workflow finished with a failure.
+type WorkflowFailedError struct {
+	ID int
+}
+
+func (e *WorkflowFailedError) Error() string {
+	return fmt.Sprintf("workflow %d failed", e.ID)
+}
+
+// StatusPollInterval is how often a WorkflowMonitor asks for the status.
+var StatusPollInterval = 2 * time.Second
+
 // NewWorkflowMonitor creates a new WorkflowMonitor.
 func NewWorkflowMonitor(client *openrelik.Client, workflow *openrelik.Workflow, taskShortNames []string, taskUUIDs []string, uuidToShort map[string]string, interactive bool, showProgress bool) *WorkflowMonitor {
 	return &WorkflowMonitor{
@@ -209,7 +222,7 @@ func (m *WorkflowMonitor) monitorInteractive(ctx context.Context) (*openrelik.Wo
 			close(stopUI)
 			<-uiDone
 			return lastStatus, ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(StatusPollInterval):
 		}
 	}
 
@@ -230,7 +243,7 @@ func (m *WorkflowMonitor) monitorInteractive(ctx context.Context) (*openrelik.Wo
 	}
 
 	if workflowFailed {
-		return lastStatus, fmt.Errorf("workflow %d failed", m.workflow.ID)
+		return lastStatus, &WorkflowFailedError{ID: m.workflow.ID}
 	}
 
 	return lastStatus, nil
@@ -301,14 +314,14 @@ func (m *WorkflowMonitor) monitorNonInteractive(ctx context.Context) (*openrelik
 		done := IsTerminalTaskStatus(status.Status)
 		if done {
 			if strings.EqualFold(status.Status, "FAILURE") {
-				return lastStatus, fmt.Errorf("workflow %d failed", m.workflow.ID)
+				return lastStatus, &WorkflowFailedError{ID: m.workflow.ID}
 			}
 			break
 		}
 		select {
 		case <-ctx.Done():
 			return lastStatus, ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(StatusPollInterval):
 		}
 	}
 	return lastStatus, nil

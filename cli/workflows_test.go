@@ -11,7 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/openrelik/openrelik-cli/util"
 )
 
 func TestWorkflowCmd(t *testing.T) {
@@ -436,4 +440,146 @@ func TestWorkflowDownload(t *testing.T) {
 			t.Fatalf("expected a missing directory error, got %v", err)
 		}
 	})
+}
+
+// newWaitServer serves workflow 99 in folder 9, whose status requests get
+// the statuses in turn, repeating the last one. A workflow without tasks is
+// served as 98. It returns a pointer to the number of status requests.
+func newWaitServer(t *testing.T, statuses ...string) *int {
+	t.Helper()
+	var mu sync.Mutex
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/workflows/99":
+			fmt.Fprint(w, `{"id": 99, "folder": {"id": 9}, "tasks": [
+				{"id": 1, "uuid": "u-strings", "display_name": "Strings", "runtime": 2,
+					"output_files": [{"id": 500, "display_name": "strings.txt"}]}]}`)
+		case "/api/v1/workflows/98":
+			fmt.Fprint(w, `{"id": 98, "folder": {"id": 9}, "tasks": []}`)
+		case "/api/v1/folders/9/workflows/99/status/":
+			mu.Lock()
+			s := statuses[min(polls, len(statuses)-1)]
+			polls++
+			mu.Unlock()
+			fmt.Fprintf(w, `{"status": %q, "tasks": [
+				{"id": 1, "uuid": "u-strings", "display_name": "Strings", "status_short": %q}]}`, s, s)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+	interval := util.StatusPollInterval
+	util.StatusPollInterval = time.Millisecond
+	t.Cleanup(func() { util.StatusPollInterval = interval })
+	return &polls
+}
+
+func TestWorkflowWait(t *testing.T) {
+	tests := []struct {
+		name      string
+		statuses  []string
+		args      []string
+		want      string // substrings of the output, separated by "|"
+		wantErr   string
+		wantExit  int
+		wantPolls int // 0 skips the check
+	}{
+		{
+			name:      "success",
+			statuses:  []string{"PENDING", "STARTED", "SUCCESS"},
+			args:      []string{"workflow", "wait", "99"},
+			want:      "Status: SUCCESS|Strings  SUCCESS  2.0s     500        strings.txt",
+			wantPolls: 4, // three while waiting, one for the result
+		},
+		{
+			name:     "failure prints the status",
+			statuses: []string{"STARTED", "FAILURE"},
+			args:     []string{"workflow", "wait", "99"},
+			want:     "Status: FAILURE|Strings  FAILURE",
+			wantErr:  "workflow 99 failed",
+			wantExit: exitError,
+		},
+		{
+			name:      "already finished",
+			statuses:  []string{"SUCCESS"},
+			args:      []string{"workflow", "wait", "99"},
+			want:      "Status: SUCCESS",
+			wantPolls: 2,
+		},
+		{
+			name:     "json",
+			statuses: []string{"SUCCESS"},
+			args:     []string{"workflow", "wait", "99", "--format", "json"},
+			want:     `"status": "SUCCESS"|"display_name": "strings.txt"`,
+		},
+		{
+			name:     "timeout",
+			statuses: []string{"STARTED"},
+			args:     []string{"workflow", "wait", "99", "--timeout", "20ms"},
+			wantErr:  "workflow 99 is still running after 20ms; it keeps running on the server",
+			wantExit: exitError,
+		},
+		{
+			name:     "never started",
+			statuses: []string{"SUCCESS"},
+			args:     []string{"workflow", "wait", "98"},
+			wantErr:  "workflow 98 hasn't been started; start it with 'openrelik workflow run 98'",
+			wantExit: exitError,
+		},
+		{
+			name:     "not found",
+			statuses: []string{"SUCCESS"},
+			args:     []string{"workflow", "wait", "97"},
+			wantErr:  "workflow 97 not found",
+			wantExit: exitNotFound,
+		},
+		{
+			name:     "bad ID",
+			statuses: []string{"SUCCESS"},
+			args:     []string{"workflow", "wait", "abc"},
+			wantErr:  `invalid workflow ID: "abc"`,
+			wantExit: exitUsage,
+		},
+		{
+			name:     "negative timeout",
+			statuses: []string{"SUCCESS"},
+			args:     []string{"workflow", "wait", "99", "--timeout", "-1s"},
+			wantErr:  "invalid timeout: -1s (must be 0 or greater)",
+			wantExit: exitUsage,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			polls := newWaitServer(t, tt.statuses...)
+			out, err := runWorkflowCmd(t, tt.args...)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Execute() failed: %v", err)
+				}
+			} else {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				if got := exitCode(err); got != tt.wantExit {
+					t.Errorf("exitCode = %d, want %d", got, tt.wantExit)
+				}
+			}
+			for _, part := range strings.Split(tt.want, "|") {
+				if !strings.Contains(out, part) {
+					t.Errorf("expected output to contain %q\n%s", part, out)
+				}
+			}
+			if tt.want == "" && out != "" {
+				t.Errorf("expected no output, got:\n%s", out)
+			}
+			if tt.wantPolls != 0 && *polls != tt.wantPolls {
+				t.Errorf("status requests = %d, want %d", *polls, tt.wantPolls)
+			}
+		})
+	}
 }

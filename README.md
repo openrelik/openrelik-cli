@@ -230,6 +230,7 @@ Manage and execute forensic pipelines.
 *   `workflow create`: Create a workflow. Requires `--file <ID>` and `--template <ID>`. Use `--run` to execute immediately.
 *   `workflow info <ID>`: Display workflow structure and configuration.
 *   `workflow status <ID>`: Show current execution status.
+*   `workflow wait <ID>`: Wait for a workflow to finish and show its status. Exits 1 if it failed; `--timeout 30m` stops waiting after a while.
 *   `workflow run <ID>`: Start a created workflow.
 
 #### Example
@@ -237,6 +238,9 @@ Manage and execute forensic pipelines.
 ```bash
 # Create and start a workflow from file 10 using template 5
 openrelik workflow create --file 10 --template 5 --run
+
+# Wait for workflow 99, then download its results if it succeeded
+openrelik workflow wait 99 && openrelik workflow download 99
 ```
 
 ### Dynamic Worker Execution (`run`)

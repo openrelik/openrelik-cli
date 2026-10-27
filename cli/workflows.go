@@ -8,7 +8,9 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/openrelik/openrelik-cli/util"
 	openrelik "github.com/openrelik/openrelik-go-client"
@@ -28,6 +30,7 @@ func newWorkflowCmd() *cobra.Command {
 	cmd.AddCommand(newWorkflowListCmd())
 	cmd.AddCommand(newWorkflowInfoCmd())
 	cmd.AddCommand(newWorkflowStatusCmd())
+	cmd.AddCommand(newWorkflowWaitCmd())
 	cmd.AddCommand(newWorkflowRunCmd())
 	cmd.AddCommand(newWorkflowDownloadCmd())
 	return cmd
@@ -180,30 +183,128 @@ WORKFLOW_ID is the integer ID of the workflow.`,
 			if err != nil {
 				return err
 			}
-
-			status, _, err := client.Workflows().Status(cmd.Context(), workflow.Folder.ID, wID)
+			status, err := workflowStatus(cmd.Context(), client, workflow)
 			if err != nil {
 				return err
-			}
-
-			// The status endpoint omits runtime and output files; patch them
-			// in from the full workflow.
-			taskByID := map[int]openrelik.Task{}
-			for _, t := range util.FlattenTasks(workflow.Tasks) {
-				taskByID[t.ID] = t
-			}
-			for i := range status.Tasks {
-				if t, ok := taskByID[status.Tasks[i].ID]; ok {
-					if t.Runtime != nil {
-						status.Tasks[i].Runtime = t.Runtime
-					}
-					status.Tasks[i].OutputFiles = t.OutputFiles
-				}
 			}
 
 			return formatAndPrint(cmd, &WorkflowStatusView{WorkflowStatus: status})
 		},
 	}
+}
+
+func newWorkflowWaitCmd() *cobra.Command {
+	var timeout time.Duration
+
+	cmd := &cobra.Command{
+		Use:   "wait <WORKFLOW_ID>",
+		Short: "Wait for a workflow to finish",
+		Long: `Wait until a workflow has finished, then print its status as 'workflow
+status' does, with the output files of each task.
+
+The exit status is 0 if the workflow succeeded and 1 if it failed, so
+scripts can wait for a workflow and then act on the outcome. Progress is
+shown on stderr while waiting. A workflow that has already finished is
+reported at once; one that hasn't been started is an error.
+
+Use --timeout to stop waiting after a while; the command then fails, and
+the workflow keeps running on the server. Stopping the command with Ctrl-C
+doesn't stop the workflow either.`,
+		Example: `  # Wait for workflow 99, then download its results if it succeeded
+  openrelik workflow wait 99 && openrelik workflow download 99
+
+  # Wait at most 30 minutes
+  openrelik workflow wait 99 --timeout 30m
+
+  # Only use the exit status
+  openrelik workflow wait 99 -q || echo "workflow 99 failed"`,
+		Args: util.UseArgs(),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			wID, err := strconv.Atoi(args[0])
+			if err != nil || wID <= 0 {
+				return usageErrorf("invalid workflow ID: %q", args[0])
+			}
+			if timeout < 0 {
+				return usageErrorf("invalid timeout: %s (must be 0 or greater)", timeout)
+			}
+
+			client, err := newClient()
+			if err != nil {
+				return err
+			}
+			workflow, _, err := client.Workflows().Get(cmd.Context(), wID)
+			if err != nil {
+				return err
+			}
+			tasks := util.FlattenTasks(workflow.Tasks)
+			if len(tasks) == 0 {
+				return fmt.Errorf("workflow %d hasn't been started; start it with 'openrelik workflow run %d'", wID, wID)
+			}
+
+			var names, uuids []string
+			for _, t := range tasks {
+				names = append(names, strings.ToLower(t.DisplayName))
+				uuids = append(uuids, t.UUID)
+			}
+			ctx := cmd.Context()
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			monitor := util.NewWorkflowMonitor(client, workflow, names, uuids, nil, util.IsInteractiveTTY() && !quiet, !quiet)
+			_, waitErr := monitor.Monitor(ctx)
+			switch {
+			case cmd.Context().Err() != nil:
+				return fmt.Errorf("interrupted; workflow %d keeps running on the server", wID)
+			case ctx.Err() != nil:
+				return fmt.Errorf("workflow %d is still running after %s; it keeps running on the server", wID, timeout)
+			case waitErr != nil && !errors.As(waitErr, new(*util.WorkflowFailedError)):
+				return waitErr
+			}
+
+			// Fetch the workflow again for the output files the tasks
+			// produced while we waited.
+			workflow, _, err = client.Workflows().Get(cmd.Context(), wID)
+			if err != nil {
+				return err
+			}
+			status, err := workflowStatus(cmd.Context(), client, workflow)
+			if err != nil {
+				return err
+			}
+			if err := formatAndPrint(cmd, &WorkflowStatusView{WorkflowStatus: status}); err != nil {
+				return err
+			}
+			return waitErr
+		},
+	}
+
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "Stop waiting after this long, e.g. 30m or 2h (0 waits until the workflow finishes)")
+	return cmd
+}
+
+// workflowStatus gets the status of workflow and its tasks. The status
+// endpoint omits runtime and output files, so they are patched in from the
+// full workflow.
+func workflowStatus(ctx context.Context, client *openrelik.Client, workflow *openrelik.Workflow) (*openrelik.WorkflowStatus, error) {
+	status, _, err := client.Workflows().Status(ctx, workflow.Folder.ID, workflow.ID)
+	if err != nil {
+		return nil, err
+	}
+	taskByID := map[int]openrelik.Task{}
+	for _, t := range util.FlattenTasks(workflow.Tasks) {
+		taskByID[t.ID] = t
+	}
+	for i := range status.Tasks {
+		if t, ok := taskByID[status.Tasks[i].ID]; ok {
+			if t.Runtime != nil {
+				status.Tasks[i].Runtime = t.Runtime
+			}
+			status.Tasks[i].OutputFiles = t.OutputFiles
+		}
+	}
+	return status, nil
 }
 
 func newWorkflowRunCmd() *cobra.Command {

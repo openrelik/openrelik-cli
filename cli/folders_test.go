@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +29,11 @@ func TestFolderListCmd(t *testing.T) {
 		if r.URL.Path == "/api/v1/folders/1/folders/" {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintln(w, `[{"id": 3, "display_name": "Sub 1", "uuid": "uuid3"}]`)
+			return
+		}
+		if r.URL.Path == "/api/v1/folders/1/files/" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `[{"id": 3, "display_name": "evidence.E01", "filesize": 2048, "data_type": "file:generic"}]`)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -53,10 +61,13 @@ func TestFolderListCmd(t *testing.T) {
 			},
 		},
 		{
-			name: "list subfolders",
+			name: "list folder contents",
 			args: []string{"folder", "list", "1"},
 			expectedOutput: []string{
-				"Sub 1",
+				"Sub 1/",
+				"evidence.E01",
+				"2.0KB",
+				"file:generic",
 			},
 		},
 	}
@@ -151,16 +162,26 @@ func TestFolderCreateCmd(t *testing.T) {
 }
 
 // newPaginatedFolderServer serves totalRoot root folders from /folders/all/
-// honoring page and page_size, and subfolderCount subfolders of folder 1.
-// Folder update times are scrambled relative to their IDs so sorting is
-// exercised. Each root folder request is counted in requests.
-func newPaginatedFolderServer(t *testing.T, totalRoot, subfolderCount int, requests *int) *httptest.Server {
+// honoring page and page_size, plus subfolderCount subfolders and fileCount
+// files in folder 1. Subfolder and file IDs both start at 1001 so they clash,
+// and update times are scrambled so sorting is exercised. Subfolder 1001 and
+// file 1001 share a name and update time to exercise the kind tiebreak. Each
+// root folder request is counted in requests.
+func newPaginatedFolderServer(t *testing.T, totalRoot, subfolderCount, fileCount int, requests *int) *httptest.Server {
 	t.Helper()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	ts := func(hours int) string { return base.Add(time.Duration(hours) * time.Hour).Format(time.RFC3339) }
 	folderJSON := func(id int, prefix string) string {
-		updated := base.Add(time.Duration((id*37)%101) * time.Hour)
 		return fmt.Sprintf(`{"id": %d, "display_name": "%s %d", "uuid": "uuid%d", "updated_at": %q}`,
-			id, prefix, id, id, updated.Format(time.RFC3339))
+			id, prefix, id, id, ts((id*37)%101))
+	}
+	fileJSON := func(id int) string {
+		name, hours := fmt.Sprintf("File %d", id), (id*53)%103
+		if id == 1001 {
+			name, hours = "Sub 1001", (id*37)%101
+		}
+		return fmt.Sprintf(`{"id": %d, "display_name": %q, "filesize": %d, "data_type": "file:generic", "updated_at": %q}`,
+			id, name, id*1024, ts(hours))
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -183,8 +204,14 @@ func newPaginatedFolderServer(t *testing.T, totalRoot, subfolderCount int, reque
 				strings.Join(items, ","), page, pageSize, totalRoot)
 		case "/api/v1/folders/1/folders/":
 			var items []string
-			for id := 1; id <= subfolderCount; id++ {
-				items = append(items, folderJSON(1000+id, "Sub"))
+			for id := 1001; id < 1001+subfolderCount; id++ {
+				items = append(items, folderJSON(id, "Sub"))
+			}
+			fmt.Fprintf(w, "[%s]", strings.Join(items, ","))
+		case "/api/v1/folders/1/files/":
+			var items []string
+			for id := 1001; id < 1001+fileCount; id++ {
+				items = append(items, fileJSON(id))
 			}
 			fmt.Fprintf(w, "[%s]", strings.Join(items, ","))
 		default:
@@ -193,13 +220,10 @@ func newPaginatedFolderServer(t *testing.T, totalRoot, subfolderCount int, reque
 	}))
 }
 
-// runFolderList executes the CLI against a mock server and returns the
-// decoded JSON folders, stderr output, and root folder request count.
-func runFolderList(t *testing.T, totalRoot, subfolderCount int, args ...string) ([]openrelik.Folder, string, int) {
+// runFolderListServer executes the CLI with args against server and returns
+// stdout, stderr and the error from Execute.
+func runFolderListServer(t *testing.T, server *httptest.Server, args ...string) (string, string, error) {
 	t.Helper()
-	requests := 0
-	server := newPaginatedFolderServer(t, totalRoot, subfolderCount, &requests)
-	defer server.Close()
 	t.Setenv("OPENRELIK_API_KEY", "test-key")
 	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
 
@@ -207,44 +231,89 @@ func runFolderList(t *testing.T, totalRoot, subfolderCount int, args ...string) 
 	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
-	root.SetArgs(append(append([]string{"folder", "list"}, args...), "--format", "json"))
-	if err := root.Execute(); err != nil {
+	root.SetArgs(append([]string{"folder", "list"}, args...))
+	err := root.Execute()
+	return stdout.String(), stderr.String(), err
+}
+
+// runFolderList executes the CLI with JSON output against a mock server and
+// returns the decoded listing, stderr output, and root folder request count.
+func runFolderList(t *testing.T, totalRoot, subfolderCount, fileCount int, args ...string) (folderContents, string, int) {
+	t.Helper()
+	requests := 0
+	server := newPaginatedFolderServer(t, totalRoot, subfolderCount, fileCount, &requests)
+	defer server.Close()
+
+	stdout, stderr, err := runFolderListServer(t, server, append(args, "--format", "json")...)
+	if err != nil {
 		t.Fatalf("Execute() failed: %v", err)
 	}
 
-	var folders []openrelik.Folder
-	if err := json.Unmarshal(stdout.Bytes(), &folders); err != nil {
-		t.Fatalf("output is not a JSON array: %v\n%s", err, stdout.String())
+	var contents folderContents
+	if err := json.Unmarshal([]byte(stdout), &contents); err != nil {
+		t.Fatalf("output is not a folder listing: %v\n%s", err, stdout)
 	}
-	return folders, stderr.String(), requests
+	if contents.Folders == nil || contents.Files == nil {
+		t.Fatalf("folders and files must be arrays, not null: %s", stdout)
+	}
+	return contents, stderr, requests
+}
+
+// entry is a kind-agnostic view of a listing row for sort assertions.
+type entry struct {
+	kind    string
+	id      int
+	name    string
+	updated time.Time
+}
+
+func folderEntries(folders []openrelik.Folder) []entry {
+	var out []entry
+	for _, f := range folders {
+		out = append(out, entry{"folder", f.ID, f.DisplayName, f.UpdatedAt})
+	}
+	return out
+}
+
+func fileEntries(files []openrelik.FolderFile) []entry {
+	var out []entry
+	for _, f := range files {
+		out = append(out, entry{"file", f.ID, f.DisplayName, f.UpdatedAt})
+	}
+	return out
 }
 
 // assertSorted fails unless less reports no adjacent pair out of order.
-func assertSorted(t *testing.T, folders []openrelik.Folder, less func(a, b openrelik.Folder) bool) {
+func assertSorted(t *testing.T, entries []entry, less func(a, b entry) bool) {
 	t.Helper()
-	for i := 1; i < len(folders); i++ {
-		if less(folders[i], folders[i-1]) {
-			t.Fatalf("folders out of order at index %d: %+v before %+v", i, folders[i-1], folders[i])
+	for i := 1; i < len(entries); i++ {
+		if less(entries[i], entries[i-1]) {
+			t.Fatalf("entries out of order at index %d: %+v before %+v", i, entries[i-1], entries[i])
 		}
 	}
 }
 
-func byName(a, b openrelik.Folder) bool {
-	return strings.ToLower(a.DisplayName) < strings.ToLower(b.DisplayName)
+func byName(a, b entry) bool { return strings.ToLower(a.name) < strings.ToLower(b.name) }
+
+func byOldest(a, b entry) bool { return a.updated.Before(b.updated) }
+
+func flip(less func(a, b entry) bool) func(a, b entry) bool {
+	return func(a, b entry) bool { return less(b, a) }
 }
 
-func byOldest(a, b openrelik.Folder) bool { return a.UpdatedAt.Before(b.UpdatedAt) }
-
 func TestFolderListFetchesAllPages(t *testing.T) {
-	folders, _, requests := runFolderList(t, 250, 0)
-	if len(folders) != 250 {
-		t.Errorf("got %d folders, want 250", len(folders))
+	contents, _, requests := runFolderList(t, 250, 0, 0)
+	if len(contents.Folders) != 250 {
+		t.Errorf("got %d folders, want 250", len(contents.Folders))
+	}
+	if len(contents.Files) != 0 {
+		t.Errorf("got %d files at the root, want 0", len(contents.Files))
 	}
 	if requests != 3 {
 		t.Errorf("got %d requests, want 3", requests)
 	}
 	seen := make(map[int]bool)
-	for _, f := range folders {
+	for _, f := range contents.Folders {
 		seen[f.ID] = true
 	}
 	if len(seen) != 250 {
@@ -253,13 +322,10 @@ func TestFolderListFetchesAllPages(t *testing.T) {
 }
 
 func TestFolderListSorting(t *testing.T) {
-	flip := func(less func(a, b openrelik.Folder) bool) func(a, b openrelik.Folder) bool {
-		return func(a, b openrelik.Folder) bool { return less(b, a) }
-	}
 	tests := []struct {
 		name string
 		args []string
-		less func(a, b openrelik.Folder) bool
+		less func(a, b entry) bool
 	}{
 		{name: "default sorts oldest first", less: byOldest},
 		{name: "-r sorts newest first", args: []string{"-r"}, less: flip(byOldest)},
@@ -270,19 +336,23 @@ func TestFolderListSorting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			folders, _, _ := runFolderList(t, 90, 0, tt.args...)
-			if len(folders) != 90 {
-				t.Fatalf("got %d folders, want 90", len(folders))
+			root, _, _ := runFolderList(t, 90, 0, 0, tt.args...)
+			if len(root.Folders) != 90 {
+				t.Fatalf("got %d folders, want 90", len(root.Folders))
 			}
-			assertSorted(t, folders, tt.less)
+			assertSorted(t, folderEntries(root.Folders), tt.less)
+
+			contents, _, _ := runFolderList(t, 0, 20, 20, append([]string{"1"}, tt.args...)...)
+			assertSorted(t, folderEntries(contents.Folders), tt.less)
+			assertSorted(t, fileEntries(contents.Files), tt.less)
 		})
 	}
 }
 
 func TestFolderListLimitKeepsMostRecent(t *testing.T) {
-	all, _, _ := runFolderList(t, 90, 0)
+	all, _, _ := runFolderList(t, 90, 0, 0)
 	newest := make(map[int]bool)
-	for _, f := range all[80:] {
+	for _, f := range all.Folders[80:] {
 		newest[f.ID] = true
 	}
 
@@ -291,11 +361,11 @@ func TestFolderListLimitKeepsMostRecent(t *testing.T) {
 		{"--limit", "10", "-r"},
 		{"--limit", "10", "--sort", "name"},
 	} {
-		limited, _, _ := runFolderList(t, 90, 0, args...)
-		if len(limited) != 10 {
-			t.Fatalf("%v: got %d folders, want 10", args, len(limited))
+		limited, _, _ := runFolderList(t, 90, 0, 0, args...)
+		if len(limited.Folders) != 10 {
+			t.Fatalf("%v: got %d folders, want 10", args, len(limited.Folders))
 		}
-		for _, f := range limited {
+		for _, f := range limited.Folders {
 			if !newest[f.ID] {
 				t.Errorf("%v: folder %d is not among the 10 most recently updated", args, f.ID)
 			}
@@ -303,61 +373,135 @@ func TestFolderListLimitKeepsMostRecent(t *testing.T) {
 	}
 
 	// The default order still applies to the limited set.
-	limited, _, _ := runFolderList(t, 90, 0, "--limit", "10")
-	for i, f := range limited {
-		if want := all[80+i].ID; f.ID != want {
+	limited, _, _ := runFolderList(t, 90, 0, 0, "--limit", "10")
+	for i, f := range limited.Folders {
+		if want := all.Folders[80+i].ID; f.ID != want {
 			t.Errorf("limited[%d] has id %d, want %d", i, f.ID, want)
 		}
 	}
-	limited, _, _ = runFolderList(t, 90, 0, "--limit", "10", "--sort", "name")
-	assertSorted(t, limited, byName)
+	limited, _, _ = runFolderList(t, 90, 0, 0, "--limit", "10", "--sort", "name")
+	assertSorted(t, folderEntries(limited.Folders), byName)
 }
 
-func TestFolderListSubfolders(t *testing.T) {
-	folders, _, _ := runFolderList(t, 0, 5, "1")
-	if len(folders) != 5 {
-		t.Errorf("got %d subfolders, want 5", len(folders))
+func TestFolderListContents(t *testing.T) {
+	contents, _, requests := runFolderList(t, 0, 5, 7, "1")
+	if len(contents.Folders) != 5 || len(contents.Files) != 7 {
+		t.Errorf("got %d folders and %d files, want 5 and 7", len(contents.Folders), len(contents.Files))
 	}
-	assertSorted(t, folders, byOldest)
+	if requests != 0 {
+		t.Errorf("listing a folder must not fetch root folders, got %d requests", requests)
+	}
+}
 
-	folders, _, _ = runFolderList(t, 0, 5, "1", "--limit", "3")
-	if len(folders) != 3 {
-		t.Errorf("got %d subfolders, want 3", len(folders))
+func TestFolderListLimitAcrossKinds(t *testing.T) {
+	all, _, _ := runFolderList(t, 0, 20, 20, "1")
+	merged := append(folderEntries(all.Folders), fileEntries(all.Files)...)
+	sort.SliceStable(merged, func(i, j int) bool { return merged[i].updated.After(merged[j].updated) })
+	newest := make(map[string]bool)
+	for _, e := range merged[:5] {
+		newest[fmt.Sprintf("%s/%d", e.kind, e.id)] = true
+	}
+
+	limited, stderr, _ := runFolderList(t, 0, 20, 20, "1", "--limit", "5")
+	got := append(folderEntries(limited.Folders), fileEntries(limited.Files)...)
+	if len(got) != 5 {
+		t.Fatalf("got %d entries, want 5", len(got))
+	}
+	for _, e := range got {
+		if !newest[fmt.Sprintf("%s/%d", e.kind, e.id)] {
+			t.Errorf("%s %d is not among the 5 most recently updated entries", e.kind, e.id)
+		}
+	}
+	if stderr != "" {
+		t.Errorf("expected no hint with JSON output, got %q", stderr)
+	}
+}
+
+func TestSortEntriesInterleavesKinds(t *testing.T) {
+	at := func(h int) time.Time { return time.Date(2026, 1, 1, h, 0, 0, 0, time.UTC) }
+	folder := func(id int, name string, h int) listEntry {
+		return listEntry{folder: &openrelik.Folder{ID: id, DisplayName: name, UpdatedAt: at(h)}}
+	}
+	file := func(id int, name string, h int) listEntry {
+		return listEntry{file: &openrelik.FolderFile{ID: id, DisplayName: name, UpdatedAt: at(h)}}
+	}
+	label := func(entries []listEntry) string {
+		var parts []string
+		for _, e := range entries {
+			kind := "file"
+			if e.folder != nil {
+				kind = "folder"
+			}
+			parts = append(parts, fmt.Sprintf("%s%d", kind, e.id()))
+		}
+		return strings.Join(parts, " ")
+	}
+	entries := func() []listEntry {
+		return []listEntry{
+			file(5, "same", 3),
+			folder(9, "beta", 1),
+			file(2, "Alpha", 4),
+			folder(5, "same", 3),
+			file(7, "gamma", 2),
+		}
+	}
+
+	tests := []struct {
+		name    string
+		limit   int
+		sortBy  string
+		reverse bool
+		want    string
+	}{
+		{name: "time", sortBy: "time", want: "folder9 file7 folder5 file5 file2"},
+		{name: "time reversed", sortBy: "time", reverse: true, want: "file2 file5 folder5 file7 folder9"},
+		{name: "name", sortBy: "name", want: "file2 folder9 file7 folder5 file5"},
+		{name: "name reversed", sortBy: "name", reverse: true, want: "file5 folder5 file7 folder9 file2"},
+		{name: "limit keeps newest", limit: 2, sortBy: "time", want: "file5 file2"},
+		{name: "limit then name", limit: 3, sortBy: "name", want: "file2 folder5 file5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := label(limitAndSortEntries(entries(), tt.limit, tt.sortBy, tt.reverse))
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
 func TestFolderListHumanOutput(t *testing.T) {
 	tests := []struct {
-		name     string
-		args     []string
-		wantRows int
-		wantHint string
-		wantErr  bool
+		name         string
+		args         []string
+		wantRows     int
+		wantHint     string
+		wantContains []string
+		wantErr      bool
 	}{
-		{name: "all by default", args: []string{"folder", "list"}, wantRows: 90},
-		{name: "limit", args: []string{"folder", "list", "--limit", "10"}, wantRows: 10, wantHint: "Showing 10 of 90 folders."},
-		{name: "limit above total", args: []string{"folder", "list", "--limit", "500"}, wantRows: 90},
-		{name: "quiet suppresses hint", args: []string{"folder", "list", "--limit", "10", "--quiet"}},
-		{name: "negative limit", args: []string{"folder", "list", "--limit", "-1"}, wantErr: true},
-		{name: "invalid sort", args: []string{"folder", "list", "--sort", "size"}, wantErr: true},
-		{name: "-t removed", args: []string{"folder", "list", "-t"}, wantErr: true},
+		{name: "all by default", wantRows: 90},
+		{name: "limit", args: []string{"--limit", "10"}, wantRows: 10, wantHint: "Showing 10 of 90 folders."},
+		{name: "limit above total", args: []string{"--limit", "500"}, wantRows: 90},
+		{name: "quiet suppresses hint", args: []string{"--limit", "10", "--quiet"}},
+		{
+			name:         "folder contents",
+			args:         []string{"1"},
+			wantRows:     6,
+			wantContains: []string{"SIZE", "TYPE", "Sub 1001/", "folder", "File 1002", "1002.0KB", "file:generic"},
+		},
+		{name: "folder contents limit", args: []string{"1", "--limit", "3"}, wantRows: 3, wantHint: "Showing 3 of 6 items."},
+		{name: "negative limit", args: []string{"--limit", "-1"}, wantErr: true},
+		{name: "invalid sort", args: []string{"--sort", "size"}, wantErr: true},
+		{name: "-t removed", args: []string{"-t"}, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			requests := 0
-			server := newPaginatedFolderServer(t, 90, 0, &requests)
+			server := newPaginatedFolderServer(t, 90, 3, 3, &requests)
 			defer server.Close()
-			t.Setenv("OPENRELIK_API_KEY", "test-key")
-			t.Setenv("OPENRELIK_SERVER_URL", server.URL)
 
-			root := NewRootCmd()
-			stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
-			root.SetOut(stdout)
-			root.SetErr(stderr)
-			root.SetArgs(tt.args)
-
-			err := root.Execute()
+			stdout, stderr, err := runFolderListServer(t, server, tt.args...)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected an error, got nil")
@@ -369,29 +513,331 @@ func TestFolderListHumanOutput(t *testing.T) {
 			}
 
 			rows := 0
-			if stdout.Len() > 0 {
+			if stdout != "" {
 				// Subtract the header row.
-				rows = strings.Count(stdout.String(), "\n") - 1
+				rows = strings.Count(stdout, "\n") - 1
 			}
 			if rows != tt.wantRows {
-				t.Errorf("got %d rows, want %d\n%s", rows, tt.wantRows, stdout.String())
+				t.Errorf("got %d rows, want %d\n%s", rows, tt.wantRows, stdout)
 			}
-			if strings.Contains(stdout.String(), "Showing") {
-				t.Errorf("hint must not be written to stdout: %q", stdout.String())
+			for _, want := range tt.wantContains {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("expected output to contain %q\n%s", want, stdout)
+				}
 			}
-			if tt.wantHint == "" && stderr.Len() > 0 {
-				t.Errorf("expected no hint, got %q", stderr.String())
+			if strings.Contains(stdout, "Showing") {
+				t.Errorf("hint must not be written to stdout: %q", stdout)
 			}
-			if tt.wantHint != "" && !strings.Contains(stderr.String(), tt.wantHint) {
-				t.Errorf("expected stderr to contain %q, got %q", tt.wantHint, stderr.String())
+			if tt.wantHint == "" && stderr != "" {
+				t.Errorf("expected no hint, got %q", stderr)
+			}
+			if tt.wantHint != "" && !strings.Contains(stderr, tt.wantHint) {
+				t.Errorf("expected stderr to contain %q, got %q", tt.wantHint, stderr)
 			}
 		})
 	}
 }
 
 func TestFolderListJSONHasNoHint(t *testing.T) {
-	_, stderr, _ := runFolderList(t, 90, 0, "--limit", "10")
+	_, stderr, _ := runFolderList(t, 90, 0, 0, "--limit", "10")
 	if stderr != "" {
 		t.Errorf("expected no hint with JSON output, got %q", stderr)
+	}
+}
+
+func TestFolderListVerbose(t *testing.T) {
+	requests := 0
+	server := newPaginatedFolderServer(t, 0, 2, 2, &requests)
+	defer server.Close()
+
+	stdout, _, err := runFolderListServer(t, server, "1", "--format", "verbose")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	for _, want := range []string{"Folders:", "Sub 1002", "Files:", "File 1002"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("expected verbose output to contain %q\n%s", want, stdout)
+		}
+	}
+}
+
+func TestFolderListFilesError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/folders/1/folders/" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[{"id": 2, "display_name": "Sub"}]`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	stdout, _, err := runFolderListServer(t, server, "1")
+	if err == nil {
+		t.Fatal("expected an error when listing files fails")
+	}
+	if stdout != "" {
+		t.Errorf("expected no output on error, got %q", stdout)
+	}
+}
+
+// uploadServer is a mock API that records the folders created and the files
+// uploaded by 'folder upload'.
+type uploadServer struct {
+	*httptest.Server
+	mu         sync.Mutex
+	nextID     int
+	roots      []string          // names of created root folders
+	subfolders []string          // "parentID/name" of created subfolders
+	uploads    map[string]string // filename -> folder_id
+}
+
+func newUploadServer(t *testing.T) *uploadServer {
+	t.Helper()
+	s := &uploadServer{nextID: 500, uploads: map[string]string{}}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch {
+		case r.URL.Path == "/api/v1/files/upload":
+			name := r.URL.Query().Get("resumableFilename")
+			s.uploads[name] = r.URL.Query().Get("folder_id")
+			fmt.Fprintf(w, `{"id": 900, "display_name": %q}`, name)
+		case r.URL.Path == "/api/v1/folders/" || strings.HasSuffix(r.URL.Path, "/folders/"):
+			var body struct {
+				DisplayName string `json:"display_name"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			s.nextID++
+			if r.URL.Path == "/api/v1/folders/" {
+				s.roots = append(s.roots, body.DisplayName)
+			} else {
+				parent := strings.Split(r.URL.Path, "/")[4]
+				s.subfolders = append(s.subfolders, parent+"/"+body.DisplayName)
+			}
+			fmt.Fprintf(w, `{"id": %d, "display_name": %q}`, s.nextID, body.DisplayName)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	return s
+}
+
+// writeTree creates files (relative paths) with some content under a new
+// temp dir named dirName and returns the dir's path.
+func writeTree(t *testing.T, dirName string, files ...string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), dirName)
+	for _, f := range files {
+		p := filepath.Join(dir, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("content of "+f), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func runUpload(t *testing.T, server *uploadServer, args ...string) (string, error) {
+	t.Helper()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+
+	root := NewRootCmd()
+	stdout := new(bytes.Buffer)
+	root.SetOut(stdout)
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs(append([]string{"folder", "upload"}, args...))
+	err := root.Execute()
+	return stdout.String(), err
+}
+
+func TestFolderUpload(t *testing.T) {
+	evidence := writeTree(t, "evidence", "disk.E01", "logs/syslog", "logs/deep/auth.log")
+	loose := writeTree(t, "loose", "a.txt", "b.txt")
+	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
+
+	tests := []struct {
+		name           string
+		args           []string
+		wantRoots      []string // exact names; "Upload *" matches the timestamp name
+		wantSubfolders []string
+		wantUploads    map[string]string
+		wantOutput     []string
+	}{
+		{
+			name:        "file into existing folder",
+			args:        []string{a, "--folder", "42"},
+			wantUploads: map[string]string{"a.txt": "42"},
+			wantOutput:  []string{`File "a.txt" uploaded to folder 42 (ID 900)`},
+		},
+		{
+			name:        "files into new timestamped root folder",
+			args:        []string{a, b},
+			wantRoots:   []string{"Upload *"},
+			wantUploads: map[string]string{"a.txt": "501", "b.txt": "501"},
+			wantOutput:  []string{`(ID 501)`, `File "b.txt" uploaded to folder 501`},
+		},
+		{
+			name:        "files into new named root folder",
+			args:        []string{a, "--name", "Case 7"},
+			wantRoots:   []string{"Case 7"},
+			wantUploads: map[string]string{"a.txt": "501"},
+			wantOutput:  []string{`Folder "Case 7" created (ID 501)`},
+		},
+		{
+			name:           "single directory becomes the root folder",
+			args:           []string{evidence},
+			wantRoots:      []string{"evidence"},
+			wantSubfolders: []string{"501/logs", "502/deep"},
+			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502", "auth.log": "503"},
+		},
+		{
+			name:           "directory into existing folder is created inside it",
+			args:           []string{evidence, "--folder", "42"},
+			wantSubfolders: []string{"42/evidence", "501/logs", "502/deep"},
+			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502", "auth.log": "503"},
+		},
+		{
+			name:           "depth limits recursion",
+			args:           []string{evidence, "--depth", "1"},
+			wantRoots:      []string{"evidence"},
+			wantSubfolders: []string{"501/logs"},
+			wantUploads:    map[string]string{"disk.E01": "501", "syslog": "502"},
+		},
+		{
+			name:           "mixed files and directories into new root folder",
+			args:           []string{a, evidence},
+			wantRoots:      []string{"Upload *"},
+			wantSubfolders: []string{"501/evidence", "502/logs", "503/deep"},
+			wantUploads:    map[string]string{"a.txt": "501", "disk.E01": "502", "syslog": "503", "auth.log": "504"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+
+			out, err := runUpload(t, server, tt.args...)
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+
+			if len(server.roots) != len(tt.wantRoots) {
+				t.Fatalf("created root folders %q, want %q", server.roots, tt.wantRoots)
+			}
+			for i, want := range tt.wantRoots {
+				got := server.roots[i]
+				if want == "Upload *" {
+					if _, err := time.Parse("Upload 2006-01-02 15:04", got); err != nil {
+						t.Errorf("root folder %q is not a timestamp name: %v", got, err)
+					}
+				} else if got != want {
+					t.Errorf("created root folder %q, want %q", got, want)
+				}
+			}
+			if strings.Join(server.subfolders, ",") != strings.Join(tt.wantSubfolders, ",") {
+				t.Errorf("created subfolders %q, want %q", server.subfolders, tt.wantSubfolders)
+			}
+			if len(server.uploads) != len(tt.wantUploads) {
+				t.Errorf("uploaded %v, want %v", server.uploads, tt.wantUploads)
+			}
+			for file, folder := range tt.wantUploads {
+				if got := server.uploads[file]; got != folder {
+					t.Errorf("%s uploaded to folder %q, want %q", file, got, folder)
+				}
+			}
+			for _, want := range tt.wantOutput {
+				if !strings.Contains(out, want) {
+					t.Errorf("expected output to contain %q\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestFolderUploadErrors(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt")
+	a := filepath.Join(loose, "a.txt")
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "missing path creates nothing", args: []string{a, filepath.Join(loose, "missing")}, wantErr: "no such file"},
+		{name: "folder and name conflict", args: []string{a, "--folder", "42", "--name", "x"}, wantErr: "none of the others can be"},
+		{name: "invalid folder ID", args: []string{a, "--folder", "0"}, wantErr: "invalid folder ID"},
+		{name: "no paths", args: []string{}, wantErr: "PATH"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+
+			_, err := runUpload(t, server, tt.args...)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+			}
+			if len(server.roots)+len(server.subfolders)+len(server.uploads) > 0 {
+				t.Errorf("nothing should be created on error: roots %q, subfolders %q, uploads %v",
+					server.roots, server.subfolders, server.uploads)
+			}
+		})
+	}
+}
+
+func TestFolderUploadJSON(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt")
+	server := newUploadServer(t)
+	defer server.Close()
+
+	out, err := runUpload(t, server, filepath.Join(loose, "a.txt"), "--name", "Case", "--format", "json")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	var got struct {
+		FolderID int `json:"folder_id"`
+		Created  struct {
+			ID          int    `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"created_folder"`
+		Uploads []struct {
+			File     struct{ ID int } `json:"file"`
+			FolderID int              `json:"folder_id"`
+		} `json:"uploads"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if got.FolderID != 501 || got.Created.DisplayName != "Case" || len(got.Uploads) != 1 ||
+		got.Uploads[0].File.ID != 900 || got.Uploads[0].FolderID != 501 {
+		t.Errorf("unexpected JSON: %s", out)
+	}
+}
+
+func TestDefaultUploadFolderName(t *testing.T) {
+	now := time.Date(2026, 10, 27, 14, 5, 0, 0, time.UTC)
+	tests := []struct {
+		paths []string
+		isDir []bool
+		want  string
+	}{
+		{[]string{"./evidence/"}, []bool{true}, "evidence"},
+		{[]string{"/cases/disk.E01"}, []bool{false}, "Upload 2026-10-27 14:05"},
+		{[]string{"a", "b"}, []bool{true, true}, "Upload 2026-10-27 14:05"},
+	}
+	for _, tt := range tests {
+		if got := defaultUploadFolderName(tt.paths, tt.isDir, now); got != tt.want {
+			t.Errorf("defaultUploadFolderName(%q) = %q, want %q", tt.paths, got, tt.want)
+		}
 	}
 }

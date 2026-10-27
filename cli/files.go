@@ -19,52 +19,14 @@ var (
 
 func newFileCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "file",
-		Aliases: []string{"files"},
-		Short:   "Manage files",
-		Long:    `Upload, download, and inspect files stored in OpenRelik.`,
+		Use:   "file",
+		Short: "Manage files",
+		Long:  `Download and inspect files stored in OpenRelik.`,
 	}
 
-	cmd.AddCommand(newListFilesCmd())
 	cmd.AddCommand(newFileInfoCmd())
 	cmd.AddCommand(newFileDownloadCmd())
-	cmd.AddCommand(newFileUploadCmd())
 	return cmd
-}
-
-func newListFilesCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:     "list <FOLDER_ID>",
-		Aliases: []string{"ls"},
-		Short:   "List files in a folder",
-		Long: `List all files contained in the specified folder.
-
-FOLDER_ID is the integer ID of the folder, as shown by 'folder list'.`,
-		Example: `  # List files in folder 42
-  openrelik file list 42
-
-  # Output as JSON
-  openrelik file list 42 --format json`,
-		Args: util.UseArgs(),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fID, err := strconv.Atoi(args[0])
-			if err != nil {
-				return fmt.Errorf("invalid folder ID: %w", err)
-			}
-
-			client, err := newClient()
-			if err != nil {
-				return err
-			}
-
-			files, _, err := client.Folders().ListFiles(cmd.Context(), fID)
-			if err != nil {
-				return err
-			}
-
-			return formatAndPrint(cmd, &FileListView{Files: files})
-		},
-	}
 }
 
 func newFileInfoCmd() *cobra.Command {
@@ -74,7 +36,7 @@ func newFileInfoCmd() *cobra.Command {
 		Long: `Display detailed metadata for a file, including size, hashes, MIME type,
 and timestamps.
 
-ID is the integer file ID, as shown by 'file list'.`,
+ID is the integer file ID, as shown by 'folder list <FOLDER_ID>'.`,
 		Example: `  # Show metadata for file 123
   openrelik file info 123
 
@@ -254,56 +216,4 @@ func uploadFileWithProgress(ctx context.Context, out io.Writer, client *openreli
 		tracker.Finish()
 	}
 	return result, err
-}
-
-func newFileUploadCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "upload <FILE_PATH> [FILE_PATH...] <FOLDER_ID>",
-		Short: "Upload one or more files",
-		Long: `Upload one or more local files to an OpenRelik folder using resumable
-chunked uploads with progress tracking.
-
-All arguments before the last are treated as local file paths; the last
-argument is the integer FOLDER_ID of the destination folder. At least one
-file path and a folder ID are required.`,
-		Example: `  # Upload a single file to folder 42
-  openrelik file upload report.pdf 42
-
-  # Upload multiple files
-  openrelik file upload file1.txt file2.txt file3.txt 42
-
-  # Use a larger chunk size (bytes) for fast networks
-  openrelik file upload large.bin 42 --chunk-size 8388608`,
-		Args:         util.UseArgs(),
-		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fID, err := strconv.Atoi(args[len(args)-1])
-			if err != nil {
-				return fmt.Errorf("invalid folder ID: %w", err)
-			}
-			filePaths := args[:len(args)-1]
-
-			client, err := newClient()
-			if err != nil {
-				return err
-			}
-
-			var results []*openrelik.File
-			for _, filePath := range filePaths {
-				result, err := uploadFileWithProgress(cmd.Context(), cmd.ErrOrStderr(), client, filePath, fID)
-				if err != nil {
-					return err
-				}
-				results = append(results, result)
-			}
-
-			if len(results) == 1 {
-				return formatAndPrint(cmd, &FileUploadedView{File: results[0], FolderID: fID})
-			}
-			return formatAndPrint(cmd, &FileUploadedMultiView{Files: results, FolderID: fID})
-		},
-	}
-
-	cmd.Flags().IntVar(&chunkSize, "chunk-size", 4*1024*1024, "Chunk size in bytes")
-	return cmd
 }

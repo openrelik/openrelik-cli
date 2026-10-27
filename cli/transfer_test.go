@@ -579,6 +579,42 @@ func TestUploadJSONIncludesSkipped(t *testing.T) {
 	}
 }
 
+func TestUploadVerboseSkipped(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt", "b.txt")
+	sum := sha256.Sum256([]byte("content of a.txt"))
+	tests := []struct {
+		name      string
+		args      []string
+		wantStart string
+	}{
+		{name: "all skipped", args: []string{"a.txt"}, wantStart: `Skipped "a.txt"`},
+		{name: "some skipped", args: []string{"a.txt", "b.txt"}, wantStart: "ID"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			server.files["42"] = `[{"id": 77, "display_name": "a.txt", "filesize": 16}]`
+			server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
+
+			var args []string
+			for _, a := range tt.args {
+				args = append(args, filepath.Join(loose, a))
+			}
+			out, err := runUpload(t, server, append(args, "42", "--format", "verbose")...)
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if !strings.HasPrefix(out, tt.wantStart) {
+				t.Errorf("expected output to start with %q\n%q", tt.wantStart, out)
+			}
+			if !strings.Contains(out, `Skipped "a.txt"`) {
+				t.Errorf("expected a.txt to be reported as skipped\n%s", out)
+			}
+		})
+	}
+}
+
 func TestUploadPartialFailureNamesCreatedFolder(t *testing.T) {
 	loose := writeTree(t, "loose", "a.txt", "fail.txt")
 	server := newUploadServer(t)
@@ -987,6 +1023,60 @@ func TestDownloadStaysInDirectory(t *testing.T) {
 			}
 			if got, _ := os.ReadFile(tt.wantFile); string(got) != "PWNED\n" {
 				t.Errorf("expected the download in %s, got %q", tt.wantFile, got)
+			}
+		})
+	}
+}
+
+func TestUploadRepeatedPathOnce(t *testing.T) {
+	loose := writeTree(t, "loose", "a.txt")
+	a := filepath.Join(loose, "a.txt")
+	// The same file under another spelling of its path.
+	other := filepath.Join(loose, ".", "a.txt")
+	content := "content of a.txt"
+	sum := sha256.Sum256([]byte(content))
+
+	tests := []struct {
+		name     string
+		args     []string
+		files    string // JSON listing of folder 42
+		wantLine string
+	}{
+		{
+			name:     "new file is uploaded once",
+			args:     []string{a, other, "42"},
+			wantLine: `File "a.txt" uploaded`,
+		},
+		{
+			name:     "existing file is skipped once",
+			args:     []string{a, a, "42"},
+			files:    fmt.Sprintf(`[{"id": 77, "display_name": "a.txt", "filesize": %d}]`, len(content)),
+			wantLine: `Skipped "a.txt"`,
+		},
+		{
+			name:     "directory is uploaded once",
+			args:     []string{loose, loose + "/", "42"},
+			wantLine: `File "a.txt" uploaded`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newUploadServer(t)
+			defer server.Close()
+			if tt.files != "" {
+				server.files["42"] = tt.files
+			}
+			server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
+
+			out, err := runUpload(t, server, tt.args...)
+			if err != nil {
+				t.Fatalf("Execute() failed: %v", err)
+			}
+			if n := strings.Count(out, tt.wantLine); n != 1 {
+				t.Errorf("expected %q once, got %d times\n%s", tt.wantLine, n, out)
+			}
+			if len(server.subfolders) > 1 {
+				t.Errorf("created subfolders %q, want at most one", server.subfolders)
 			}
 		})
 	}

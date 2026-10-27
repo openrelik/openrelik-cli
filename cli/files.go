@@ -73,7 +73,7 @@ the file ID instead.`,
 
   # Output as JSON
   openrelik file info 123 --format json`,
-		Args: util.UseArgs(),
+		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := newClient()
 			if err != nil {

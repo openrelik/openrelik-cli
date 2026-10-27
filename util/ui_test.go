@@ -2,6 +2,7 @@ package util
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -58,5 +59,20 @@ func TestProgressTracker(t *testing.T) {
 	}
 	if !strings.Contains(output, "test") {
 		t.Errorf("expected output to contain 'test', got %q", output)
+	}
+}
+
+func TestConfirmRepeatedOnSameReader(t *testing.T) {
+	// All answers arrive in one buffer; each Confirm call must consume only its own line.
+	r := strings.NewReader("y\nn\nyes\n\nY")
+	want := []bool{true, false, true, false, true, false}
+	for i, w := range want {
+		got, err := Confirm(io.Discard, r, "Continue?")
+		if err != nil {
+			t.Fatalf("prompt %d: unexpected error: %v", i, err)
+		}
+		if got != w {
+			t.Errorf("prompt %d: got %v, want %v", i, got, w)
+		}
 	}
 }

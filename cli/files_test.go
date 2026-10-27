@@ -349,14 +349,15 @@ func TestDownloadByPath(t *testing.T) {
 func TestFileInfo(t *testing.T) {
 	tests := []struct {
 		name    string
-		arg     string
+		args    []string
 		wantID  float64
 		wantErr string
 	}{
-		{name: "ID", arg: "3", wantID: 3},
-		{name: "path", arg: "/Case A/evidence/disk.bin", wantID: 3},
-		{name: "duplicate file names", arg: "Case A/dup.txt", wantErr: `multiple files match "Case A/dup.txt"`},
-		{name: "name without folder", arg: "abc", wantErr: `invalid file "abc"`},
+		{name: "ID", args: []string{"3"}, wantID: 3},
+		{name: "path", args: []string{"/Case A/evidence/disk.bin"}, wantID: 3},
+		{name: "duplicate file names", args: []string{"Case A/dup.txt"}, wantErr: `multiple files match "Case A/dup.txt"`},
+		{name: "name without folder", args: []string{"abc"}, wantErr: `invalid file "abc"`},
+		{name: "unquoted path", args: []string{"Case", "A/evidence/disk.bin"}, wantErr: `Quote FILE if it contains spaces: "Case A/evidence/disk.bin"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -371,7 +372,7 @@ func TestFileInfo(t *testing.T) {
 			stdout := new(bytes.Buffer)
 			root.SetOut(stdout)
 			root.SetErr(new(bytes.Buffer))
-			root.SetArgs([]string{"file", "info", tt.arg, "--format", "json"})
+			root.SetArgs(append([]string{"file", "info", "--format", "json"}, tt.args...))
 			err := root.Execute()
 
 			if tt.wantErr != "" {

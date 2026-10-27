@@ -95,10 +95,10 @@ func (v *UploadView) RenderVerbose(w io.Writer) error {
 		files = append(files, *u.File)
 	}
 	util.FprintTable(w, files)
-	if len(v.Skipped) > 0 {
+	if len(v.Uploads) > 0 && len(v.Skipped) > 0 {
 		fmt.Fprintln(w)
-		v.renderSkipped(w)
 	}
+	v.renderSkipped(w)
 	return nil
 }
 

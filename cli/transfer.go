@@ -83,9 +83,12 @@ instead. Use --force to upload without checking.`,
 			}
 
 			// Check every path up front so nothing is created for a typo.
-			isDir := make([]bool, len(sources))
-			sizes := make([]int64, len(sources))
-			for i, p := range sources {
+			// A path given more than once, under any name, is uploaded once.
+			var unique []string
+			var infos []os.FileInfo
+			var isDir []bool
+			var sizes []int64
+			for _, p := range sources {
 				if abs, err := filepath.Abs(p); err == nil && filepath.Dir(abs) == abs {
 					return fmt.Errorf("refusing to upload the filesystem root %q", p)
 				}
@@ -93,9 +96,15 @@ instead. Use --force to upload without checking.`,
 				if err != nil {
 					return err
 				}
-				isDir[i] = info.IsDir()
-				sizes[i] = info.Size()
+				if slices.ContainsFunc(infos, func(seen os.FileInfo) bool { return os.SameFile(seen, info) }) {
+					continue
+				}
+				unique = append(unique, p)
+				infos = append(infos, info)
+				isDir = append(isDir, info.IsDir())
+				sizes = append(sizes, info.Size())
 			}
+			sources = unique
 
 			client, err := newClient()
 			if err != nil {

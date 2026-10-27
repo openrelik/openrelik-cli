@@ -279,20 +279,42 @@ func (pr *ProgressReader) Read(p []byte) (int, error) {
 }
 
 // Confirm asks the user for confirmation (y/n) via the given reader and writer.
+// It consumes exactly one line from r, so it can be called repeatedly on the
+// same reader without losing input that arrived in a single read.
 func Confirm(w io.Writer, r io.Reader, message string) (bool, error) {
 	fmt.Fprintf(w, "%s [y/N]: ", message)
-	scanner := bufio.NewScanner(r)
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return false, err
-		}
-		return false, nil // EOF
+	line, err := readLine(r)
+	if err != nil && err != io.EOF {
+		return false, err
 	}
-	response := strings.ToLower(strings.TrimSpace(scanner.Text()))
+	response := strings.ToLower(strings.TrimSpace(line))
 	if response == "y" || response == "yes" {
 		return true, nil
 	}
 	return false, nil
+}
+
+// readLine reads up to and including the next '\n'. Unless r is already a
+// *bufio.Reader it reads one byte at a time, so nothing past the newline is
+// taken from r.
+func readLine(r io.Reader) (string, error) {
+	if br, ok := r.(*bufio.Reader); ok {
+		return br.ReadString('\n')
+	}
+	var b strings.Builder
+	buf := make([]byte, 1)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			b.WriteByte(buf[0])
+			if buf[0] == '\n' {
+				return b.String(), nil
+			}
+		}
+		if err != nil {
+			return b.String(), err
+		}
+	}
 }
 
 // IsInteractiveTTY returns true when stderr is connected to a real terminal.

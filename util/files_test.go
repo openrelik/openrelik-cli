@@ -202,12 +202,13 @@ func TestDownloadResults(t *testing.T) {
 	t.Run("Download all", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		client := resultsServer(t, oneTask, helloSHA256)
-		total, _, err := DownloadResults(ctx, client, 100, "all", nil, tmpDir, false, "text", false)
+		saved, _, err := DownloadResults(ctx, client, 100, "all", nil, tmpDir, false, "text", false)
 		if err != nil {
 			t.Fatalf("DownloadResults failed: %v", err)
 		}
-		if total != 5 {
-			t.Errorf("Expected total 5, got %d", total)
+		want := SavedFile{FileID: 10, Path: filepath.Join(tmpDir, "output.txt"), Size: 5, SHA256: helloSHA256, Verified: true}
+		if len(saved) != 1 || *saved[0] != want {
+			t.Errorf("saved %+v, want [%+v]", saved, want)
 		}
 
 		content, err := os.ReadFile(filepath.Join(tmpDir, "output.txt"))
@@ -221,12 +222,12 @@ func TestDownloadResults(t *testing.T) {
 
 	t.Run("Download none", func(t *testing.T) {
 		client := resultsServer(t, oneTask, helloSHA256)
-		total, _, err := DownloadResults(ctx, client, 100, "none", nil, t.TempDir(), false, "text", false)
+		saved, _, err := DownloadResults(ctx, client, 100, "none", nil, t.TempDir(), false, "text", false)
 		if err != nil {
 			t.Fatalf("DownloadResults failed: %v", err)
 		}
-		if total != 0 {
-			t.Errorf("Expected total 0, got %d", total)
+		if len(saved) != 0 {
+			t.Errorf("Expected nothing saved, got %+v", saved)
 		}
 	})
 
@@ -258,7 +259,7 @@ func TestDownloadResults(t *testing.T) {
 			tasks: `[{"uuid": "t1", "id": 1, "display_name": "Task",
 				"output_files": [{"id": 10, "display_name": "output.txt"}]}]`,
 			existing: "output.txt",
-			wantErr:  `already exists; move it away or choose another --output-dir`,
+			wantErr:  `already exists; move it away or download to another directory`,
 		},
 		{
 			name: "tasks with the same output name",

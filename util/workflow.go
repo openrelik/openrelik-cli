@@ -16,6 +16,7 @@ package util
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -500,4 +501,30 @@ func FlattenTasks(tasks []openrelik.Task) []openrelik.Task {
 		}
 	}
 	return flattened
+}
+
+// TaskSettings returns the configuration of each task in a workflow spec,
+// keyed by task UUID, which is also the UUID of the task the server runs.
+// Tasks without configuration are left out. A spec that can't be parsed
+// gives no settings.
+func TaskSettings(specJSON *string) map[string][]WorkflowTaskConfig {
+	settings := map[string][]WorkflowTaskConfig{}
+	if specJSON == nil {
+		return settings
+	}
+	var spec WorkflowSpec
+	if err := json.Unmarshal([]byte(*specJSON), &spec); err != nil {
+		return settings
+	}
+	var walk func(tasks []WorkflowTask)
+	walk = func(tasks []WorkflowTask) {
+		for _, t := range tasks {
+			if len(t.TaskConfig) > 0 {
+				settings[t.UUID] = t.TaskConfig
+			}
+			walk(t.Tasks)
+		}
+	}
+	walk(spec.Workflow.Tasks)
+	return settings
 }

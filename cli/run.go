@@ -219,9 +219,15 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 				return fmt.Errorf("failed to marshal workflow spec: %w", err)
 			}
 			specJSON := string(specBytes)
+			workflowID := workflow.ID
 			workflow, _, err = client.Workflows().Run(cmd.Context(), workflow.Folder.ID, workflow.ID, &specJSON)
 			if err != nil {
-				return fmt.Errorf("failed to start workflow %d: %w", workflow.ID, err)
+				return fmt.Errorf("failed to start workflow %d: %w", workflowID, err)
+			}
+			// Show the ID before waiting, so it is known even if the
+			// command is interrupted.
+			if showProgress {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Workflow %d started in folder %d\n", workflow.ID, workflow.Folder.ID)
 			}
 
 			interactive := util.IsInteractiveTTY() && showProgress
@@ -238,9 +244,9 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 
 			// Phase 4: Download results
 			var fullWorkflow *openrelik.Workflow
-			var totalDownloaded int64
+			var saved []*util.SavedFile
 			if lastStatus != nil {
-				totalDownloaded, fullWorkflow, err = util.DownloadResults(cmd.Context(), client, workflow.ID, downloadPolicy, taskDownloadPrefs, outputDir, taskFolders, outputFormat, showProgress)
+				saved, fullWorkflow, err = util.DownloadResults(cmd.Context(), client, workflow.ID, downloadPolicy, taskDownloadPrefs, outputDir, taskFolders, outputFormat, showProgress)
 				if err != nil {
 					return errors.Join(workflowErr, fmt.Errorf("results of workflow %d were not downloaded: %w", workflow.ID, err))
 				}
@@ -253,6 +259,13 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 				return workflowErr
 			}
 
+			if err := formatAndPrint(cmd, &RunResultView{Workflow: workflow, Status: lastStatus.Status, Saved: saved}); err != nil {
+				return err
+			}
+			var totalDownloaded int64
+			for _, f := range saved {
+				totalDownloaded += f.Size
+			}
 			monitor.PrintSummary(startTime, totalUploaded, totalDownloaded)
 
 			return workflowErr

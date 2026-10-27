@@ -124,9 +124,10 @@ func ResolveInputs(ctx context.Context, client *openrelik.Client, args []string,
 }
 
 // DownloadResults fetches the full workflow details and downloads the requested output files.
-func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID int, policy string, taskDownloadPrefs map[string]bool, outputDir string, taskFolders bool, outputFormat string, showProgress bool) (int64, *openrelik.Workflow, error) {
+// It returns the files it saved.
+func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID int, policy string, taskDownloadPrefs map[string]bool, outputDir string, taskFolders bool, outputFormat string, showProgress bool) ([]*SavedFile, *openrelik.Workflow, error) {
 	var fullWorkflow *openrelik.Workflow
-	var totalDownloaded int64
+	var saved []*SavedFile
 
 	hasPositiveOverride := false
 	for _, v := range taskDownloadPrefs {
@@ -141,12 +142,12 @@ func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID i
 		var err error
 		fullWorkflow, _, err = client.Workflows().Get(ctx, workflowID)
 		if err != nil {
-			return 0, nil, fmt.Errorf("failed to fetch workflow details: %w", err)
+			return nil, nil, fmt.Errorf("failed to fetch workflow details: %w", err)
 		}
 	}
 
 	if (policy == "none" && !hasPositiveOverride) || fullWorkflow == nil {
-		return 0, fullWorkflow, nil
+		return nil, fullWorkflow, nil
 	}
 
 	tasksToDownload := []openrelik.Task{}
@@ -187,22 +188,22 @@ func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID i
 		if taskFolders {
 			folderName, err := LocalFileName(fmt.Sprintf("%s_%d", strings.ReplaceAll(task.DisplayName, " ", "_"), task.ID))
 			if err != nil {
-				return 0, nil, fmt.Errorf("task %d: %w", task.ID, err)
+				return nil, nil, fmt.Errorf("task %d: %w", task.ID, err)
 			}
 			destDir = filepath.Join(outputDir, folderName)
 		}
 		for _, outputFile := range task.OutputFiles {
 			name, err := LocalFileName(outputFile.DisplayName)
 			if err != nil {
-				return 0, nil, fmt.Errorf("output file %d of task %q: %w", outputFile.ID, task.DisplayName, err)
+				return nil, nil, fmt.Errorf("output file %d of task %q: %w", outputFile.ID, task.DisplayName, err)
 			}
 			destPath := filepath.Join(destDir, name)
 			if other, ok := seen[destPath]; ok {
-				return 0, nil, fmt.Errorf("tasks %q and %q both produce %q; use --task-folders to keep them apart", other, task.DisplayName, destPath)
+				return nil, nil, fmt.Errorf("tasks %q and %q both produce %q; use --task-folders to keep them apart", other, task.DisplayName, destPath)
 			}
 			seen[destPath] = task.DisplayName
 			if _, err := os.Lstat(destPath); err == nil {
-				return 0, nil, fmt.Errorf("%q already exists; move it away or choose another --output-dir", destPath)
+				return nil, nil, fmt.Errorf("%q already exists; move it away or download to another directory", destPath)
 			}
 			downloads = append(downloads, download{outputFile.ID, destPath})
 		}
@@ -214,21 +215,21 @@ func DownloadResults(ctx context.Context, client *openrelik.Client, workflowID i
 	}
 	for _, d := range downloads {
 		if err := os.MkdirAll(filepath.Dir(d.destPath), 0755); err != nil {
-			return 0, nil, fmt.Errorf("failed to create task folder: %w", err)
+			return nil, nil, fmt.Errorf("failed to create task folder: %w", err)
 		}
 		// Output files in the workflow don't include hashes.
 		file, _, err := client.Files().Info(ctx, d.fileID)
 		if err != nil {
-			return 0, nil, fmt.Errorf("failed to get output file %d: %w", d.fileID, err)
+			return nil, nil, fmt.Errorf("failed to get output file %d: %w", d.fileID, err)
 		}
-		saved, err := SaveFile(ctx, client, file, d.destPath, false, progress)
+		f, err := SaveFile(ctx, client, file, d.destPath, false, progress)
 		if err != nil {
-			return 0, nil, err
+			return saved, nil, err
 		}
-		totalDownloaded += saved.Size
+		saved = append(saved, f)
 	}
 
-	return totalDownloaded, fullWorkflow, nil
+	return saved, fullWorkflow, nil
 }
 
 // LocalFileName turns a file's display name from the server into a single

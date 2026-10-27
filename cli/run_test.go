@@ -263,15 +263,26 @@ func TestRunFailedWorkflow(t *testing.T) {
 
 	outDir := t.TempDir()
 	root := NewRootCmd()
-	root.SetOut(new(bytes.Buffer))
-	root.SetErr(new(bytes.Buffer))
-	root.SetArgs([]string{"run", "-q", "-o", outDir, "strings", "123"})
+	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs([]string{"run", "-o", outDir, "strings", "123"})
 	err := root.Execute()
 	if err == nil || !strings.Contains(err.Error(), "workflow 100 failed") {
 		t.Fatalf("expected error containing %q, got %v", "workflow 100 failed", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(outDir, "partial.txt")); string(got) != "partial" {
 		t.Errorf("expected the results to be downloaded, got %q", got)
+	}
+
+	// The workflow ID is shown when it starts, and the outcome and saved
+	// files are printed as the result.
+	if !strings.Contains(stderr.String(), "Workflow 100 started in folder 1\n") {
+		t.Errorf("expected the workflow ID on stderr, got %q", stderr.String())
+	}
+	wantOut := fmt.Sprintf("Workflow 100 finished: FAILURE (folder 1)\nFile 10 saved to %q\n  SHA256 ", filepath.Join(outDir, "partial.txt"))
+	if !strings.HasPrefix(stdout.String(), wantOut) {
+		t.Errorf("stdout = %q, want it to start with %q", stdout.String(), wantOut)
 	}
 }
 

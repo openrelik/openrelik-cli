@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -187,6 +188,8 @@ func (v *FolderContentsView) contents() folderContents {
 type FolderTreeView struct {
 	Root        *treeNode
 	FoldersOnly bool
+	// ShowSize adds each file's size inside its brackets, like 'tree -s -h'.
+	ShowSize bool
 }
 
 func (v *FolderTreeView) RenderHuman(w io.Writer) error {
@@ -210,7 +213,11 @@ func (v *FolderTreeView) RenderHuman(w io.Writer) error {
 				continue
 			}
 			files++
-			fmt.Fprintf(w, "%s%s[%d]  %s\n", prefix, connector, e.file.ID, e.file.DisplayName)
+			details := strconv.Itoa(e.file.ID)
+			if v.ShowSize {
+				details += "  " + util.FormatBytes(e.file.Filesize)
+			}
+			fmt.Fprintf(w, "%s%s[%s]  %s\n", prefix, connector, details, e.file.DisplayName)
 		}
 	}
 	walk(v.Root, "")

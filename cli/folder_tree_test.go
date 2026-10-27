@@ -24,6 +24,7 @@ type treeServerFile struct {
 	id    int
 	name  string
 	hours int
+	size  int64
 }
 
 // treeServerFolders is the mock tree:
@@ -36,9 +37,9 @@ type treeServerFile struct {
 //	└── Zed.bin (1002)
 //	empty/ (2)
 var treeServerFolders = map[int]treeServerFolder{
-	1:   {name: "case", hours: 1, children: []int{11}, files: []treeServerFile{{1001, "alpha.txt", 5}, {1002, "Zed.bin", 2}}},
+	1:   {name: "case", hours: 1, children: []int{11}, files: []treeServerFile{{1001, "alpha.txt", 5, 2048}, {1002, "Zed.bin", 2, 12}}},
 	11:  {name: "beta", hours: 3, children: []int{111}},
-	111: {name: "deep", hours: 4, files: []treeServerFile{{1003, "x.log", 6}}},
+	111: {name: "deep", hours: 4, files: []treeServerFile{{1003, "x.log", 6, 0}}},
 	2:   {name: "empty", hours: 0},
 }
 
@@ -90,7 +91,7 @@ func newTreeServer(t *testing.T, failFiles bool, fileRequests *int) *httptest.Se
 			}
 			var items []string
 			for _, file := range f.files {
-				items = append(items, fmt.Sprintf(`{"id": %d, "display_name": %q, "updated_at": %q}`, file.id, file.name, ts(file.hours)))
+				items = append(items, fmt.Sprintf(`{"id": %d, "display_name": %q, "updated_at": %q, "filesize": %d}`, file.id, file.name, ts(file.hours), file.size))
 			}
 			fmt.Fprintf(w, "[%s]", strings.Join(items, ","))
 		default:
@@ -158,6 +159,20 @@ func TestFolderTree(t *testing.T) {
 │   └── [111]  deep/
 │       └── [1003]  x.log
 └── [1001]  alpha.txt
+
+2 folders, 3 files
+`,
+			wantFileRequests: 3,
+		},
+		{
+			name: "size",
+			args: []string{"1", "--size"},
+			want: `[1]  case/
+├── [1001  2.0KB]  alpha.txt
+├── [11]  beta/
+│   └── [111]  deep/
+│       └── [1003  0B]  x.log
+└── [1002  12B]  Zed.bin
 
 2 folders, 3 files
 `,

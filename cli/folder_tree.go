@@ -18,6 +18,7 @@ func newTreeFoldersCmd() *cobra.Command {
 	var opts listOptions
 	var level int
 	var foldersOnly bool
+	var showSize bool
 
 	cmd := &cobra.Command{
 		Use:   "tree [FOLDER]",
@@ -31,12 +32,15 @@ entry shows its ID in brackets; folder names end in '/'.
 Entries are sorted by name; use --sort time to sort by last update (oldest
 first) and -r to reverse the order. Use --level N to limit the depth and
 --folders-only to leave out files, which also makes large trees faster to
-fetch.`,
+fetch. Use --size to show file sizes.`,
 		Example: `  # Show everything below folder 42
   openrelik folder tree 42
 
   # Show a folder by path, two levels deep
   openrelik folder tree "Case A/" --level 2
+
+  # Show file sizes
+  openrelik folder tree 42 --size
 
   # Show only the folder structure of all root folders
   openrelik folder tree --folders-only`,
@@ -93,7 +97,7 @@ fetch.`,
 			}
 
 			root.sort(opts.sortBy, opts.reverse)
-			return formatAndPrint(cmd, &FolderTreeView{Root: root, FoldersOnly: foldersOnly})
+			return formatAndPrint(cmd, &FolderTreeView{Root: root, FoldersOnly: foldersOnly, ShowSize: showSize})
 		},
 	}
 
@@ -101,6 +105,7 @@ fetch.`,
 	cmd.Flags().BoolVarP(&opts.reverse, "reverse", "r", false, "Reverse the sort order")
 	cmd.Flags().IntVar(&level, "level", 0, "Maximum depth to show (0 shows all levels)")
 	cmd.Flags().BoolVar(&foldersOnly, "folders-only", false, "Show folders only, not files")
+	cmd.Flags().BoolVar(&showSize, "size", false, "Show file sizes")
 	return cmd
 }
 

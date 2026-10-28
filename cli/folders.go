@@ -121,14 +121,26 @@ recently updated entries, in the selected sort order.`,
 			var folders []openrelik.Folder
 			var files []openrelik.FolderFile
 			noun := "folders"
+			total := -1
 			switch {
 			case fID != 0:
 				folders, files, err = fetchFolderContents(cmd.Context(), client, fID)
 				noun = "items"
 			case shared:
 				folders, _, err = client.Folders().ListSharedFolders(cmd.Context())
+			case !quiet && outputFormat == "human" && opts.sortBy == "time" && !opts.reverse && opts.limit == 0:
+				// Rows can be printed as they arrive when the server sorts.
+				// Not newest first: a folder updated while listing would
+				// move before the cursor and be missed.
+				var streamed bool
+				if streamed, err = streamRootFolders(cmd, client); err != nil || streamed {
+					return err
+				}
+				folders, err = listRootFolders(cmd, client)
+			case opts.limit > 0 && opts.limit <= util.RootFolderBatchSize:
+				folders, total, err = recentRootFolders(cmd, client, opts.limit)
 			default:
-				folders, err = util.ListAllRootFolders(cmd.Context(), client)
+				folders, err = listRootFolders(cmd, client)
 			}
 
 			if err != nil {
@@ -143,7 +155,9 @@ recently updated entries, in the selected sort order.`,
 				entries = append(entries, listEntry{file: &files[i]})
 			}
 
-			total := len(entries)
+			if total < 0 {
+				total = len(entries)
+			}
 			entries = limitAndSortEntries(entries, opts.limit, opts.sortBy, opts.reverse)
 
 			var view any = &FolderContentsView{Entries: entries}
@@ -264,7 +278,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 // segments, starting at the root folders, and returns every folder reached,
 // including those that match only the start of segments.
 func walkFolderPath(ctx context.Context, client *openrelik.Client, segments []string) ([]folderMatch, error) {
-	roots, err := util.ListAllRootFolders(ctx, client)
+	roots, err := util.ListAllRootFolders(ctx, client, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -357,6 +371,73 @@ func ambiguousFolderError(path string, matches []folderMatch) error {
 	tw.Flush()
 	b.WriteString("\nUse one of the IDs above instead of the path.")
 	return errors.New(b.String())
+}
+
+// listRootFolders lists every root folder. With thousands of them this
+// takes a while, so on a terminal it shows on stderr how many have been
+// fetched; the listing itself needs them all before it can be sorted.
+func listRootFolders(cmd *cobra.Command, client *openrelik.Client) ([]openrelik.Folder, error) {
+	w := cmd.ErrOrStderr()
+	if quiet || !util.IsTerminal(w) {
+		return util.ListAllRootFolders(cmd.Context(), client, nil)
+	}
+	shown := false
+	defer func() {
+		if shown {
+			fmt.Fprint(w, "\r\033[K")
+		}
+	}()
+	return util.ListAllRootFolders(cmd.Context(), client, func(fetched, total int) {
+		fmt.Fprintf(w, "\r%sFetching root folders: %d of %d%s\033[K", util.ColorDim, fetched, total, util.ColorReset)
+		shown = true
+	})
+}
+
+// streamRootFolders prints the root folders as a folder listing, page by
+// page as the server sends them sorted by last update, oldest first. It
+// returns false, having printed nothing, if the server can't sort them. If it
+// fails after printing some rows, the error says how many, as the listing on
+// stdout is incomplete.
+func streamRootFolders(cmd *cobra.Command, client *openrelik.Client) (bool, error) {
+	// IDs of later pages may be wider than those of the first; a minimum
+	// width keeps the columns lined up for IDs below 10 million.
+	rw := &folderRowWriter{w: cmd.OutOrStdout(), minIDWidth: 7}
+	printed := 0
+	total, ok, err := util.StreamRootFolders(cmd.Context(), client, "updated_at", "asc", 0, func(page []openrelik.Folder) error {
+		entries := make([]listEntry, len(page))
+		for i := range page {
+			entries[i] = listEntry{folder: &page[i]}
+		}
+		if err := rw.write(entries); err != nil {
+			return err
+		}
+		printed += len(page)
+		return nil
+	})
+	if err != nil && printed > 0 {
+		return ok, fmt.Errorf("listing incomplete, printed %d of %d root folders: %w", printed, total, err)
+	}
+	return ok, err
+}
+
+// recentRootFolders returns the limit most recently updated root folders
+// (limit at most util.RootFolderBatchSize) and the number of root folders.
+// Servers that sort return just those, in one request; from older servers,
+// all root folders are fetched.
+func recentRootFolders(cmd *cobra.Command, client *openrelik.Client, limit int) ([]openrelik.Folder, int, error) {
+	var folders []openrelik.Folder
+	total, ok, err := util.StreamRootFolders(cmd.Context(), client, "updated_at", "desc", limit, func(page []openrelik.Folder) error {
+		folders = append(folders, page...)
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	if ok {
+		return folders, total, nil
+	}
+	folders, err = listRootFolders(cmd, client)
+	return folders, len(folders), err
 }
 
 // fetchFolderContents fetches the subfolders and files of a folder
@@ -679,7 +760,7 @@ folder: your root folders and folders shared with you.`,
 // searchRootFolders returns the folders 'folder list' shows at the top level
 // whose names contain term, ignoring case like the server's search.
 func searchRootFolders(ctx context.Context, client *openrelik.Client, term string) ([]openrelik.Folder, error) {
-	roots, err := util.ListAllRootFolders(ctx, client)
+	roots, err := util.ListAllRootFolders(ctx, client, nil)
 	if err != nil {
 		return nil, err
 	}

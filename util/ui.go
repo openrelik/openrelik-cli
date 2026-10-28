@@ -66,7 +66,7 @@ func NewProgressTracker(writer io.Writer, totalBytes int64, action string) *Prog
 	now := time.Now()
 	return &ProgressTracker{
 		Writer:        writer,
-		Live:          isTerminal(writer),
+		Live:          IsTerminal(writer),
 		TotalBytes:    totalBytes,
 		Action:        action,
 		startTime:     now,
@@ -340,12 +340,12 @@ func readLine(r io.Reader) (string, error) {
 // can redraw lines. Progress output goes to stderr, so that is the relevant
 // fd to check.
 func IsInteractiveTTY() bool {
-	return isTerminal(os.Stderr)
+	return IsTerminal(os.Stderr)
 }
 
-// isTerminal reports whether w is a terminal that can redraw lines; not
+// IsTerminal reports whether w is a terminal that can redraw lines; not
 // with TERM=dumb.
-func isTerminal(w io.Writer) bool {
+func IsTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	return ok && term.IsTerminal(int(f.Fd())) && os.Getenv("TERM") != "dumb"
 }

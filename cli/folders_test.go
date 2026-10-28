@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,7 +163,8 @@ func TestFolderCreateCmd(t *testing.T) {
 }
 
 // newPaginatedFolderServer serves totalRoot root folders from /folders/all/
-// honoring page and page_size, plus subfolderCount subfolders and fileCount
+// honoring page and page_size (and sort, order and after if mockCursors is
+// set), plus subfolderCount subfolders and fileCount
 // files in folder 1. Subfolder and file IDs both start at 1001 so they clash,
 // and update times are scrambled so sorting is exercised. Subfolder 1001 and
 // file 1001 share a name and update time to exercise the kind tiebreak. Each
@@ -183,11 +185,20 @@ func newPaginatedFolderServer(t *testing.T, totalRoot, subfolderCount, fileCount
 		return fmt.Sprintf(`{"id": %d, "display_name": %q, "filesize": %d, "data_type": "file:generic", "updated_at": %q}`,
 			id, name, id*1024, ts(hours))
 	}
+	var mu sync.Mutex
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/v1/folders/all/":
+			// Root folder pages are fetched concurrently.
+			mu.Lock()
 			*requests++
+			n := *requests
+			mu.Unlock()
+			if n == mockFailRootRequest {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 			pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 			if page == 0 {
@@ -195,6 +206,10 @@ func newPaginatedFolderServer(t *testing.T, totalRoot, subfolderCount, fileCount
 			}
 			if pageSize == 0 {
 				pageSize = 40
+			}
+			if mockCursors {
+				serveSortedRootFolders(w, r, totalRoot, page, pageSize, func(id int) int { return (id * 37) % 101 }, folderJSON)
+				return
 			}
 			var items []string
 			for id := (page-1)*pageSize + 1; id <= min(page*pageSize, totalRoot); id++ {
@@ -218,6 +233,85 @@ func newPaginatedFolderServer(t *testing.T, totalRoot, subfolderCount, fileCount
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+}
+
+// mockCursors makes newPaginatedFolderServer act like servers that sort root
+// folders and page through them with cursors, instead of an older server.
+var mockCursors bool
+
+// mockFailRootRequest makes newPaginatedFolderServer fail that root folder
+// request (counting from 1) with a server error, if set.
+var mockFailRootRequest int
+
+// forEachServerKind runs f against an older server, without sorting and
+// cursors, and against a newer one.
+func forEachServerKind(t *testing.T, f func(t *testing.T)) {
+	t.Helper()
+	for _, cursors := range []bool{false, true} {
+		name := "older server"
+		if cursors {
+			name = "server with cursors"
+		}
+		t.Run(name, func(t *testing.T) {
+			mockCursors = cursors
+			defer func() { mockCursors = false }()
+			f(t)
+		})
+	}
+}
+
+// serveSortedRootFolders answers a /folders/all/ request like a server with
+// sorting and cursors, for root folders 1 to total updated hours(id) hours
+// into 2026. Folders are created in ID order. The cursor is the index of the
+// next folder.
+func serveSortedRootFolders(w http.ResponseWriter, r *http.Request, total, page, pageSize int, hours func(int) int, folderJSON func(int, string) string) {
+	q := r.URL.Query()
+	sortBy, order := q.Get("sort"), q.Get("order")
+	if sortBy == "" {
+		sortBy = "created_at"
+	}
+	if order == "" {
+		order = "desc"
+	}
+	ids := make([]int, total)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	key := func(id int) string {
+		switch sortBy {
+		case "updated_at":
+			return fmt.Sprintf("%05d", hours(id))
+		case "display_name":
+			return strings.ToLower(fmt.Sprintf("Root %d", id))
+		}
+		return ""
+	}
+	sort.SliceStable(ids, func(i, j int) bool {
+		a, b := ids[i], ids[j]
+		if order == "desc" {
+			a, b = b, a
+		}
+		if ka, kb := key(a), key(b); ka != kb {
+			return ka < kb
+		}
+		return a < b
+	})
+	start, totalJSON := (page-1)*pageSize, strconv.Itoa(total)
+	if after := q.Get("after"); after != "" {
+		start, _ = strconv.Atoi(after)
+		totalJSON = "null"
+	}
+	end := min(start+pageSize, total)
+	var items []string
+	for _, id := range ids[min(start, total):end] {
+		items = append(items, folderJSON(id, "Root"))
+	}
+	next := "null"
+	if end < total {
+		next = strconv.Quote(strconv.Itoa(end))
+	}
+	fmt.Fprintf(w, `{"folders": [%s], "page": %d, "page_size": %d, "total_count": %s, "sort": %q, "order": %q, "next_cursor": %s}`,
+		strings.Join(items, ","), page, pageSize, totalJSON, sortBy, order, next)
 }
 
 // runFolderListServer executes the CLI with args against server and returns
@@ -302,85 +396,228 @@ func flip(less func(a, b entry) bool) func(a, b entry) bool {
 }
 
 func TestFolderListFetchesAllPages(t *testing.T) {
-	contents, _, requests := runFolderList(t, 250, 0, 0)
-	if len(contents.Folders) != 250 {
-		t.Errorf("got %d folders, want 250", len(contents.Folders))
-	}
-	if len(contents.Files) != 0 {
-		t.Errorf("got %d files at the root, want 0", len(contents.Files))
-	}
-	if requests != 3 {
-		t.Errorf("got %d requests, want 3", requests)
-	}
-	seen := make(map[int]bool)
-	for _, f := range contents.Folders {
-		seen[f.ID] = true
-	}
-	if len(seen) != 250 {
-		t.Errorf("got %d unique folders, want 250", len(seen))
-	}
+	forEachServerKind(t, func(t *testing.T) {
+		contents, _, requests := runFolderList(t, 250, 0, 0)
+		if len(contents.Folders) != 250 {
+			t.Errorf("got %d folders, want 250", len(contents.Folders))
+		}
+		if len(contents.Files) != 0 {
+			t.Errorf("got %d files at the root, want 0", len(contents.Files))
+		}
+		// Older servers get three pages of 100; with cursors, the first page of
+		// 100 is followed by one of 1000.
+		if want := map[bool]int{false: 3, true: 2}[mockCursors]; requests != want {
+			t.Errorf("got %d requests, want %d", requests, want)
+		}
+		seen := make(map[int]bool)
+		for _, f := range contents.Folders {
+			seen[f.ID] = true
+		}
+		if len(seen) != 250 {
+			t.Errorf("got %d unique folders, want 250", len(seen))
+		}
+	})
 }
 
 func TestFolderListSorting(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		less func(a, b entry) bool
-	}{
-		{name: "default sorts oldest first", less: byOldest},
-		{name: "-r sorts newest first", args: []string{"-r"}, less: flip(byOldest)},
-		{name: "--reverse sorts newest first", args: []string{"--reverse"}, less: flip(byOldest)},
-		{name: "--sort name sorts by name", args: []string{"--sort", "name"}, less: byName},
-		{name: "--sort name -r reverses name sort", args: []string{"--sort", "name", "-r"}, less: flip(byName)},
-		{name: "--sort time is the default", args: []string{"--sort", "time"}, less: byOldest},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root, _, _ := runFolderList(t, 90, 0, 0, tt.args...)
-			if len(root.Folders) != 90 {
-				t.Fatalf("got %d folders, want 90", len(root.Folders))
-			}
-			assertSorted(t, folderEntries(root.Folders), tt.less)
+	forEachServerKind(t, func(t *testing.T) {
+		tests := []struct {
+			name string
+			args []string
+			less func(a, b entry) bool
+		}{
+			{name: "default sorts oldest first", less: byOldest},
+			{name: "-r sorts newest first", args: []string{"-r"}, less: flip(byOldest)},
+			{name: "--reverse sorts newest first", args: []string{"--reverse"}, less: flip(byOldest)},
+			{name: "--sort name sorts by name", args: []string{"--sort", "name"}, less: byName},
+			{name: "--sort name -r reverses name sort", args: []string{"--sort", "name", "-r"}, less: flip(byName)},
+			{name: "--sort time is the default", args: []string{"--sort", "time"}, less: byOldest},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				root, _, _ := runFolderList(t, 90, 0, 0, tt.args...)
+				if len(root.Folders) != 90 {
+					t.Fatalf("got %d folders, want 90", len(root.Folders))
+				}
+				assertSorted(t, folderEntries(root.Folders), tt.less)
 
-			contents, _, _ := runFolderList(t, 0, 20, 20, append([]string{"1"}, tt.args...)...)
-			assertSorted(t, folderEntries(contents.Folders), tt.less)
-			assertSorted(t, fileEntries(contents.Files), tt.less)
-		})
-	}
+				contents, _, _ := runFolderList(t, 0, 20, 20, append([]string{"1"}, tt.args...)...)
+				assertSorted(t, folderEntries(contents.Folders), tt.less)
+				assertSorted(t, fileEntries(contents.Files), tt.less)
+			})
+		}
+	})
 }
 
 func TestFolderListLimitKeepsMostRecent(t *testing.T) {
-	all, _, _ := runFolderList(t, 90, 0, 0)
-	newest := make(map[int]bool)
-	for _, f := range all.Folders[80:] {
-		newest[f.ID] = true
-	}
-
-	for _, args := range [][]string{
-		{"--limit", "10"},
-		{"--limit", "10", "-r"},
-		{"--limit", "10", "--sort", "name"},
-	} {
-		limited, _, _ := runFolderList(t, 90, 0, 0, args...)
-		if len(limited.Folders) != 10 {
-			t.Fatalf("%v: got %d folders, want 10", args, len(limited.Folders))
+	forEachServerKind(t, func(t *testing.T) {
+		all, _, _ := runFolderList(t, 90, 0, 0)
+		newest := make(map[int]bool)
+		for _, f := range all.Folders[80:] {
+			newest[f.ID] = true
 		}
-		for _, f := range limited.Folders {
-			if !newest[f.ID] {
-				t.Errorf("%v: folder %d is not among the 10 most recently updated", args, f.ID)
+
+		for _, args := range [][]string{
+			{"--limit", "10"},
+			{"--limit", "10", "-r"},
+			{"--limit", "10", "--sort", "name"},
+		} {
+			limited, _, _ := runFolderList(t, 90, 0, 0, args...)
+			if len(limited.Folders) != 10 {
+				t.Fatalf("%v: got %d folders, want 10", args, len(limited.Folders))
+			}
+			for _, f := range limited.Folders {
+				if !newest[f.ID] {
+					t.Errorf("%v: folder %d is not among the 10 most recently updated", args, f.ID)
+				}
 			}
 		}
-	}
 
-	// The default order still applies to the limited set.
-	limited, _, _ := runFolderList(t, 90, 0, 0, "--limit", "10")
-	for i, f := range limited.Folders {
-		if want := all.Folders[80+i].ID; f.ID != want {
-			t.Errorf("limited[%d] has id %d, want %d", i, f.ID, want)
+		// The default order still applies to the limited set.
+		limited, _, _ := runFolderList(t, 90, 0, 0, "--limit", "10")
+		for i, f := range limited.Folders {
+			if want := all.Folders[80+i].ID; f.ID != want {
+				t.Errorf("limited[%d] has id %d, want %d", i, f.ID, want)
+			}
+		}
+		limited, _, _ = runFolderList(t, 90, 0, 0, "--limit", "10", "--sort", "name")
+		assertSorted(t, folderEntries(limited.Folders), byName)
+	})
+}
+
+func TestFolderListStreamsLikeBufferedOutput(t *testing.T) {
+	run := func(cursors bool, args ...string) (string, int) {
+		mockCursors = cursors
+		defer func() { mockCursors = false }()
+		requests := 0
+		server := newPaginatedFolderServer(t, 2500, 0, 0, &requests)
+		defer server.Close()
+		stdout, stderr, err := runFolderListServer(t, server, args...)
+		if err != nil {
+			t.Fatalf("Execute(%v) failed: %v", args, err)
+		}
+		if stderr != "" {
+			t.Errorf("%v: expected no stderr output, got %q", args, stderr)
+		}
+		return stdout, requests
+	}
+	// fields drops the padding: streamed IDs get a wider column.
+	fields := func(out string) [][]string {
+		var rows [][]string
+		for _, line := range strings.Split(out, "\n") {
+			rows = append(rows, strings.Fields(line))
+		}
+		return rows
+	}
+	// -r isn't streamed (folders updated while listing would be missed),
+	// but follows created_at cursors and sorts locally.
+	for _, args := range [][]string{nil, {"-r"}} {
+		buffered, _ := run(false, args...)
+		streamed, requests := run(true, args...)
+		if !reflect.DeepEqual(fields(streamed), fields(buffered)) {
+			t.Errorf("%v: output from a server with cursors differs from an older server's", args)
+		}
+		if args == nil && !strings.HasPrefix(streamed, "ID       UPDATED") {
+			t.Errorf("streamed ID column should be 7 wide:\n%s", streamed[:min(len(streamed), 200)])
+		}
+		if args != nil && streamed != buffered {
+			t.Errorf("%v: buffered output differs between servers", args)
+		}
+		// A first page of 100, then pages of 1000.
+		if requests != 4 {
+			t.Errorf("%v: got %d requests, want 4", args, requests)
+		}
+		if lines := strings.Count(streamed, "\n"); lines != 2501 {
+			t.Errorf("%v: got %d lines, want a header and 2500 rows", args, lines)
 		}
 	}
-	limited, _, _ = runFolderList(t, 90, 0, 0, "--limit", "10", "--sort", "name")
-	assertSorted(t, folderEntries(limited.Folders), byName)
+}
+
+func TestFolderListStreamFailureSaysWhatWasPrinted(t *testing.T) {
+	mockCursors, mockFailRootRequest = true, 3
+	defer func() { mockCursors, mockFailRootRequest = false, 0 }()
+	requests := 0
+	server := newPaginatedFolderServer(t, 2500, 0, 0, &requests)
+	defer server.Close()
+
+	stdout, _, err := runFolderListServer(t, server)
+	if err == nil || !strings.Contains(err.Error(), "listing incomplete, printed 1100 of 2500 root folders") {
+		t.Fatalf("got error %v, want it to say how many folders were printed", err)
+	}
+	if rows := strings.Count(stdout, "\n") - 1; rows != 1100 {
+		t.Errorf("got %d rows on stdout, want the 1100 printed", rows)
+	}
+	// The server error is still in the chain, for the exit code.
+	if exitCode(err) != 5 {
+		t.Errorf("exit code %d, want 5 for a failing server", exitCode(err))
+	}
+}
+
+func TestFolderListLargeLimitWithCursors(t *testing.T) {
+	mockCursors = true
+	defer func() { mockCursors = false }()
+	requests := 0
+	server := newPaginatedFolderServer(t, 2500, 0, 0, &requests)
+	defer server.Close()
+
+	// Above one batch, all root folders are fetched by creation time and
+	// limited locally, so updates while paging can't skip any.
+	limited, _, err := runFolderListServer(t, server, "--limit", "1500", "--format", "json")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	var contents folderContents
+	if err := json.Unmarshal([]byte(limited), &contents); err != nil {
+		t.Fatal(err)
+	}
+	if len(contents.Folders) != 1500 {
+		t.Errorf("got %d folders, want 1500", len(contents.Folders))
+	}
+	if requests != 4 {
+		t.Errorf("got %d requests, want 4 (100, then 3 pages of up to 1000)", requests)
+	}
+}
+
+func TestFolderListLimitIsOneRequestWithCursors(t *testing.T) {
+	mockCursors = true
+	defer func() { mockCursors = false }()
+	for _, args := range [][]string{{"--limit", "10"}, {"--limit", "10", "--format", "json"}, {"--limit", "10", "--sort", "name"}} {
+		requests := 0
+		server := newPaginatedFolderServer(t, 2500, 0, 0, &requests)
+		stdout, stderr, err := runFolderListServer(t, server, args...)
+		server.Close()
+		if err != nil {
+			t.Fatalf("Execute(%v) failed: %v", args, err)
+		}
+		if requests != 1 {
+			t.Errorf("%v: got %d requests, want 1", args, requests)
+		}
+		if args[len(args)-1] == "json" {
+			continue
+		}
+		if !strings.Contains(stderr, "Showing 10 of 2500 folders.") {
+			t.Errorf("%v: expected the truncation hint with the server's total, got %q", args, stderr)
+		}
+		if rows := strings.Count(stdout, "\n") - 1; rows != 10 {
+			t.Errorf("%v: got %d rows, want 10", args, rows)
+		}
+	}
+}
+
+func TestFolderListHumanColumns(t *testing.T) {
+	requests := 0
+	server := newPaginatedFolderServer(t, 0, 1, 1, &requests)
+	defer server.Close()
+	stdout, _, err := runFolderListServer(t, server, "1")
+	if err != nil {
+		t.Fatalf("Execute() failed: %v", err)
+	}
+	want := "ID    UPDATED               SIZE      TYPE          DISPLAY NAME\n" +
+		"1001  2026-01-03T23:00:00Z  -         folder        Sub 1001/\n" +
+		"1001  2026-01-03T23:00:00Z  1001.0KB  file:generic  Sub 1001\n"
+	if stdout != want {
+		t.Errorf("got:\n%s\nwant:\n%s", stdout, want)
+	}
 }
 
 func TestFolderListContents(t *testing.T) {
@@ -471,78 +708,82 @@ func TestSortEntriesInterleavesKinds(t *testing.T) {
 }
 
 func TestFolderListHumanOutput(t *testing.T) {
-	tests := []struct {
-		name         string
-		args         []string
-		wantRows     int
-		wantHint     string
-		wantContains []string
-		wantErr      bool
-	}{
-		{name: "all by default", wantRows: 90},
-		{name: "limit", args: []string{"--limit", "10"}, wantRows: 10, wantHint: "Showing 10 of 90 folders."},
-		{name: "limit above total", args: []string{"--limit", "500"}, wantRows: 90},
-		{name: "quiet suppresses hint", args: []string{"--limit", "10", "--quiet"}},
-		{
-			name:         "folder contents",
-			args:         []string{"1"},
-			wantRows:     6,
-			wantContains: []string{"SIZE", "TYPE", "Sub 1001/", "folder", "File 1002", "1002.0KB", "file:generic"},
-		},
-		{name: "folder contents limit", args: []string{"1", "--limit", "3"}, wantRows: 3, wantHint: "Showing 3 of 6 items."},
-		{name: "negative limit", args: []string{"--limit", "-1"}, wantErr: true},
-		{name: "invalid sort", args: []string{"--sort", "size"}, wantErr: true},
-		{name: "-t removed", args: []string{"-t"}, wantErr: true},
-	}
+	forEachServerKind(t, func(t *testing.T) {
+		tests := []struct {
+			name         string
+			args         []string
+			wantRows     int
+			wantHint     string
+			wantContains []string
+			wantErr      bool
+		}{
+			{name: "all by default", wantRows: 90},
+			{name: "limit", args: []string{"--limit", "10"}, wantRows: 10, wantHint: "Showing 10 of 90 folders."},
+			{name: "limit above total", args: []string{"--limit", "500"}, wantRows: 90},
+			{name: "quiet suppresses hint", args: []string{"--limit", "10", "--quiet"}},
+			{
+				name:         "folder contents",
+				args:         []string{"1"},
+				wantRows:     6,
+				wantContains: []string{"SIZE", "TYPE", "Sub 1001/", "folder", "File 1002", "1002.0KB", "file:generic"},
+			},
+			{name: "folder contents limit", args: []string{"1", "--limit", "3"}, wantRows: 3, wantHint: "Showing 3 of 6 items."},
+			{name: "negative limit", args: []string{"--limit", "-1"}, wantErr: true},
+			{name: "invalid sort", args: []string{"--sort", "size"}, wantErr: true},
+			{name: "-t removed", args: []string{"-t"}, wantErr: true},
+		}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			requests := 0
-			server := newPaginatedFolderServer(t, 90, 3, 3, &requests)
-			defer server.Close()
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				requests := 0
+				server := newPaginatedFolderServer(t, 90, 3, 3, &requests)
+				defer server.Close()
 
-			stdout, stderr, err := runFolderListServer(t, server, tt.args...)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected an error, got nil")
+				stdout, stderr, err := runFolderListServer(t, server, tt.args...)
+				if tt.wantErr {
+					if err == nil {
+						t.Fatal("expected an error, got nil")
+					}
+					return
 				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Execute() failed: %v", err)
-			}
-
-			rows := 0
-			if stdout != "" {
-				// Subtract the header row.
-				rows = strings.Count(stdout, "\n") - 1
-			}
-			if rows != tt.wantRows {
-				t.Errorf("got %d rows, want %d\n%s", rows, tt.wantRows, stdout)
-			}
-			for _, want := range tt.wantContains {
-				if !strings.Contains(stdout, want) {
-					t.Errorf("expected output to contain %q\n%s", want, stdout)
+				if err != nil {
+					t.Fatalf("Execute() failed: %v", err)
 				}
-			}
-			if strings.Contains(stdout, "Showing") {
-				t.Errorf("hint must not be written to stdout: %q", stdout)
-			}
-			if tt.wantHint == "" && stderr != "" {
-				t.Errorf("expected no hint, got %q", stderr)
-			}
-			if tt.wantHint != "" && !strings.Contains(stderr, tt.wantHint) {
-				t.Errorf("expected stderr to contain %q, got %q", tt.wantHint, stderr)
-			}
-		})
-	}
+
+				rows := 0
+				if stdout != "" {
+					// Subtract the header row.
+					rows = strings.Count(stdout, "\n") - 1
+				}
+				if rows != tt.wantRows {
+					t.Errorf("got %d rows, want %d\n%s", rows, tt.wantRows, stdout)
+				}
+				for _, want := range tt.wantContains {
+					if !strings.Contains(stdout, want) {
+						t.Errorf("expected output to contain %q\n%s", want, stdout)
+					}
+				}
+				if strings.Contains(stdout, "Showing") {
+					t.Errorf("hint must not be written to stdout: %q", stdout)
+				}
+				if tt.wantHint == "" && stderr != "" {
+					t.Errorf("expected no hint, got %q", stderr)
+				}
+				if tt.wantHint != "" && !strings.Contains(stderr, tt.wantHint) {
+					t.Errorf("expected stderr to contain %q, got %q", tt.wantHint, stderr)
+				}
+			})
+		}
+	})
 }
 
 func TestFolderListJSONHasNoHint(t *testing.T) {
-	_, stderr, _ := runFolderList(t, 90, 0, 0, "--limit", "10")
-	if stderr != "" {
-		t.Errorf("expected no hint with JSON output, got %q", stderr)
-	}
+	forEachServerKind(t, func(t *testing.T) {
+		_, stderr, _ := runFolderList(t, 90, 0, 0, "--limit", "10")
+		if stderr != "" {
+			t.Errorf("expected no hint with JSON output, got %q", stderr)
+		}
+	})
 }
 
 func TestFolderListVerbose(t *testing.T) {

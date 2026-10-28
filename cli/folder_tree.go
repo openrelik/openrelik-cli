@@ -76,7 +76,7 @@ fetch. Use --size to show file sizes.`,
 				root.folder = folder
 				frontier = []*treeNode{root}
 			} else {
-				folders, err := util.ListAllRootFolders(cmd.Context(), client)
+				folders, err := listRootFolders(cmd, client)
 				if err != nil {
 					return err
 				}

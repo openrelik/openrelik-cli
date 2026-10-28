@@ -587,6 +587,11 @@ func TestFolderListFilesError(t *testing.T) {
 //	/dup/ (2)           /logs/ (21), /shared/ (22)
 //	/dup/ (3)           /shared/ (31)
 //	/42/ (4)
+//	/foo/bar/123/ (5)   /evidence/ (51)
+//	/split/ (6)         /a/b/ (61)
+//	/a/ (7)             /b/ (71), /B/ (72)
+//	/a/b/ (8)
+//	/CASE A/ (9)        /logs/ (91)
 //
 // Every folder is empty of files. Requested subfolder listings are recorded.
 func newFolderTreeServer(t *testing.T, listed *[]string) *httptest.Server {
@@ -598,14 +603,19 @@ func newFolderTreeServer(t *testing.T, listed *[]string) *httptest.Server {
 		"1": {folder(11, "evidence")},
 		"2": {folder(21, "logs"), folder(22, "shared")},
 		"3": {folder(31, "shared")},
+		"5": {folder(51, "evidence")},
+		"6": {folder(61, "a/b")},
+		"7": {folder(71, "b"), folder(72, "B")},
+		"9": {folder(91, "logs")},
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		switch {
 		case r.URL.Path == "/api/v1/folders/all/":
-			roots := []string{folder(1, "Case A"), folder(2, "dup"), folder(3, "dup"), folder(4, "42")}
-			fmt.Fprintf(w, `{"folders": [%s], "page": 1, "page_size": 100, "total_count": 4}`, strings.Join(roots, ","))
+			roots := []string{folder(1, "Case A"), folder(2, "dup"), folder(3, "dup"), folder(4, "42"),
+				folder(5, "foo/bar/123"), folder(6, "split"), folder(7, "a"), folder(8, "a/b"), folder(9, "CASE A")}
+			fmt.Fprintf(w, `{"folders": [%s], "page": 1, "page_size": 100, "total_count": 9}`, strings.Join(roots, ","))
 		case len(parts) == 5 && parts[4] == "folders":
 			*listed = append(*listed, parts[3])
 			fmt.Fprintf(w, "[%s]", strings.Join(children[parts[3]], ","))
@@ -632,6 +642,22 @@ func TestFolderListByPath(t *testing.T) {
 		{name: "digits are an ID", arg: "42", wantFolder: "42"},
 		{name: "trailing slash makes digits a name", arg: "42/", wantFolder: "4"},
 		{name: "duplicate parent resolved by child", arg: "dup/logs/", wantFolder: "21"},
+		{name: "root name containing slashes", arg: "foo/bar/123", wantFolder: "5"},
+		{name: "child of name containing slashes", arg: "/foo/bar/123/evidence/", wantFolder: "51"},
+		{name: "child name containing a slash", arg: "split/a/b/", wantFolder: "61"},
+		{name: "name containing slashes, case-insensitive", arg: "FOO/Bar/123", wantFolder: "5"},
+		{
+			name:    "slash in name or separator",
+			arg:     "a/b/",
+			wantErr: []string{`multiple folders match "a/b/"`, "\n8 ", "\n71 ", "/a/b/"},
+		},
+		{name: "exact path wins over case-insensitive ones", arg: "a/B/", wantFolder: "72"},
+		{
+			name:    "case-insensitive paths of different lengths",
+			arg:     "A/B/",
+			wantErr: []string{`multiple folders match "A/B/"`, "\n8 ", "\n71 ", "\n72 "},
+		},
+		{name: "exact parent doesn't hide a case-insensitive one", arg: "Case A/logs/", wantFolder: "91"},
 		{
 			name:    "duplicate root names",
 			arg:     "dup/",
@@ -644,6 +670,7 @@ func TestFolderListByPath(t *testing.T) {
 		},
 		{name: "missing root", arg: "nope/", wantErr: []string{`no root folder named "nope"`}},
 		{name: "missing child", arg: "Case A/nope/", wantErr: []string{`no folder named "nope" in /Case A/`}},
+		{name: "missing child of name containing slashes", arg: "foo/bar/123/nope", wantErr: []string{`no folder named "nope" in /foo/bar/123/`}},
 		{name: "empty path", arg: "/", wantErr: []string{`invalid folder path "/"`}},
 	}
 

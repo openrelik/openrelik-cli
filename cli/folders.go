@@ -59,8 +59,9 @@ folder.
 FOLDER is either a folder ID or a path of folder names starting at the
 root folders, such as 'Case A/evidence/'. An argument made only of
 digits is an ID; add a trailing '/' to treat it as a name instead
-(e.g. '2024/'). If more than one folder matches a path, the matches are
-listed so you can pick one by ID.
+(e.g. '2024/'). Names may contain '/': 'foo/bar/123' also finds a
+folder named "foo/bar/123". If more than one folder matches a path, the
+matches are listed so you can pick one by ID.
 
 Folder names end in '/' and have TYPE folder. Folder and file IDs are
 separate, so pass folder IDs to 'folder list' and file IDs to commands
@@ -204,10 +205,13 @@ func resolveFolder(ctx context.Context, client *openrelik.Client, arg string) (i
 }
 
 // folderMatch is a folder found while resolving a path, with the names of
-// the folders leading to it.
+// the folders leading to it and the number of path segments they used up.
+// folded is set when any of the names only matched case-insensitively.
 type folderMatch struct {
 	folder openrelik.Folder
 	path   []string
+	used   int
+	folded bool
 }
 
 func (m folderMatch) location() string { return formatFolderPath(m.path) }
@@ -224,14 +228,12 @@ func (e notFoundError) Error() string { return string(e) }
 
 // resolveFolderPath walks a path like "Case A/evidence/" from the root
 // folders. Every branch whose names match is followed, so a path is only
-// ambiguous if more than one complete path matches.
+// ambiguous if more than one complete path matches. Folder names may contain
+// '/', so a name can match several segments: "foo/bar/123" finds a root
+// folder named "foo/bar/123" as well as folder 123 inside foo/bar.
+// Names match case-insensitively, but paths that match exactly win.
 func resolveFolderPath(ctx context.Context, client *openrelik.Client, path string) (int, error) {
-	var segments []string
-	for _, seg := range strings.Split(path, "/") {
-		if seg != "" {
-			segments = append(segments, seg)
-		}
-	}
+	segments := pathSegments(path)
 	if len(segments) == 0 {
 		return 0, usageErrorf("invalid folder path %q", path)
 	}
@@ -240,49 +242,70 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 	if err != nil {
 		return 0, err
 	}
-	matches := matchFolderName(roots, segments[0], nil)
-	if len(matches) == 0 {
-		return 0, notFoundError(fmt.Sprintf("no root folder named %q", segments[0]))
-	}
-
-	for i, seg := range segments[1:] {
+	pending := matchFolderNames(roots, segments, folderMatch{})
+	var matches []folderMatch
+	matched := 0 // the most segments any folder matched, for the error
+	for len(pending) > 0 {
 		var next []folderMatch
-		for _, m := range matches {
+		for _, m := range pending {
+			matched = max(matched, m.used)
+			if m.used == len(segments) {
+				matches = append(matches, m)
+				continue
+			}
 			subfolders, _, err := client.Folders().ListSubFolders(ctx, m.folder.ID)
 			if err != nil {
 				return 0, err
 			}
-			next = append(next, matchFolderName(subfolders, seg, m.path)...)
+			next = append(next, matchFolderNames(subfolders, segments, m)...)
 		}
-		if len(next) == 0 {
-			return 0, notFoundError(fmt.Sprintf("no folder named %q in %s", seg, formatFolderPath(segments[:i+1])))
-		}
-		matches = next
+		pending = next
 	}
 
-	if len(matches) > 1 {
+	if exact := slices.DeleteFunc(slices.Clone(matches), func(m folderMatch) bool { return m.folded }); len(exact) > 0 {
+		matches = exact
+	}
+
+	switch {
+	case len(matches) == 0 && matched == 0:
+		return 0, notFoundError(fmt.Sprintf("no root folder named %q", segments[0]))
+	case len(matches) == 0:
+		return 0, notFoundError(fmt.Sprintf("no folder named %q in %s", segments[matched], formatFolderPath(segments[:matched])))
+	case len(matches) > 1:
 		return 0, ambiguousFolderError(path, matches)
 	}
 	return matches[0].folder.ID, nil
 }
 
-// matchFolderName returns the folders named name, falling back to a
-// case-insensitive match when no name matches exactly.
-func matchFolderName(folders []openrelik.Folder, name string, parent []string) []folderMatch {
-	var exact, folded []folderMatch
-	for _, f := range folders {
-		m := folderMatch{folder: f, path: append(slices.Clone(parent), f.DisplayName)}
-		switch {
-		case f.DisplayName == name:
-			exact = append(exact, m)
-		case strings.EqualFold(f.DisplayName, name):
-			folded = append(folded, m)
+// pathSegments splits a path on '/', dropping empty segments.
+func pathSegments(path string) []string {
+	var segments []string
+	for _, seg := range strings.Split(path, "/") {
+		if seg != "" {
+			segments = append(segments, seg)
 		}
 	}
-	if len(exact) > 0 {
-		return exact
+	return segments
+}
+
+// matchFolderNames returns the folders whose names match, ignoring case,
+// the path segments following those parent used up.
+func matchFolderNames(folders []openrelik.Folder, segments []string, parent folderMatch) []folderMatch {
+	rest := segments[parent.used:]
+	var matches []folderMatch
+	for _, f := range folders {
+		name := pathSegments(f.DisplayName)
+		if len(name) == 0 || len(name) > len(rest) || !slices.EqualFunc(name, rest[:len(name)], strings.EqualFold) {
+			continue
+		}
+		matches = append(matches, folderMatch{
+			folder: f,
+			path:   append(slices.Clone(parent.path), f.DisplayName),
+			used:   parent.used + len(name),
+			folded: parent.folded || !slices.Equal(name, rest[:len(name)]),
+		})
 	}
-	return folded
+	return matches
 }
 
 // ambiguousFolderError lists the folders matching path so the user can

@@ -406,6 +406,75 @@ func TestListAllRootFoldersFollowsCursors(t *testing.T) {
 	}
 }
 
+func TestListAllRootFoldersUnconfirmedOrder(t *testing.T) {
+	// The server echoes another order than the one asked for, so its cursors
+	// aren't trusted and the pages are fetched by number instead.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("after") != "" {
+			t.Errorf("cursor followed: %s", r.URL)
+		}
+		page, _ := strconv.Atoi(q.Get("page"))
+		var items []string
+		for id := (page-1)*100 + 1; id <= min(page*100, 250); id++ {
+			items = append(items, folderJSON(id, fmt.Sprintf("Root %d", id), 7))
+		}
+		fmt.Fprintf(w, `{"folders": [%s], "page": %d, "page_size": 100, "total_count": 250, "sort": "created_at", "order": "asc", "next_cursor": "x"}`,
+			strings.Join(items, ","), page)
+	}))
+	t.Cleanup(server.Close)
+	client, _ := openrelik.NewClient(server.URL, "test-key")
+	folders, err := ListAllRootFolders(context.Background(), client, nil)
+	if err != nil {
+		t.Fatalf("ListAllRootFolders() failed: %v", err)
+	}
+	if len(folders) != 250 {
+		t.Errorf("got %d folders, want 250", len(folders))
+	}
+}
+
+func TestListAllRootFoldersProgressPastFirstTotal(t *testing.T) {
+	// The first page counts 150 root folders, but 200 are served, as when
+	// older folders are shared while listing. Cursor pages have no total.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		size, _ := strconv.Atoi(q.Get("page_size"))
+		start, _ := strconv.Atoi(q.Get("after"))
+		end := min(start+size, 200)
+		var items []string
+		for i := start; i < end; i++ {
+			items = append(items, folderJSON(200-i, fmt.Sprintf("Root %d", 200-i), 7))
+		}
+		total, next := "null", "null"
+		if q.Get("after") == "" {
+			total = "150"
+		}
+		if end < 200 {
+			next = strconv.Quote(strconv.Itoa(end))
+		}
+		fmt.Fprintf(w, `{"folders": [%s], "page": null, "page_size": %d, "total_count": %s, "sort": "created_at", "order": "desc", "next_cursor": %s}`,
+			strings.Join(items, ","), size, total, next)
+	}))
+	t.Cleanup(server.Close)
+	client, _ := openrelik.NewClient(server.URL, "test-key")
+	var progress []string
+	folders, err := ListAllRootFolders(context.Background(), client, func(fetched, total int) {
+		if fetched > total {
+			t.Errorf("progress %d of %d", fetched, total)
+		}
+		progress = append(progress, fmt.Sprintf("%d/%d", fetched, total))
+	})
+	if err != nil {
+		t.Fatalf("ListAllRootFolders() failed: %v", err)
+	}
+	if len(folders) != 200 {
+		t.Errorf("got %d folders, want 200", len(folders))
+	}
+	if fmt.Sprint(progress) != "[100/150 200/200]" {
+		t.Errorf("progress = %v", progress)
+	}
+}
+
 func TestStreamRootFoldersLimitAboveBatch(t *testing.T) {
 	var sizes []int
 	client := newCursorRootFolderServer(t, 2500, "updated_at", &sizes)
@@ -453,30 +522,31 @@ func TestStreamRootFoldersSkipsRepeatedFolders(t *testing.T) {
 	}
 }
 
-// newGrowingRootFolderServer serves root folders newest first by page number,
-// like an older server, with folders 1 to total; after the first request, a
-// new folder (ID total+1) is created, shifting the later pages. Pages hold at
-// most maxPageSize folders, and page_size is reported as reportedSize.
-func newGrowingRootFolderServer(t *testing.T, total, maxPageSize int, reportedSize func(asked int) int) *openrelik.Client {
+// newChangingRootFolderServer serves root folders newest first by page
+// number, like an older server, with folders 1 to total. After the first
+// request, change folders are created (IDs from total+1) if change > 0, which
+// shifts the later pages, or the oldest -change folders are deleted if
+// change < 0. Pages hold at most maxPageSize folders, and page_size is
+// reported as reportedSize. requests counts the requests served.
+func newChangingRootFolderServer(t *testing.T, total, change, maxPageSize int, reportedSize func(asked int) int, requests *int) *openrelik.Client {
 	t.Helper()
 	var mu sync.Mutex
-	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		requests++
-		n := total
-		if requests > 1 {
-			n = total + 1
+		*requests++
+		newest, oldest := total, 1
+		if *requests > 1 {
+			newest, oldest = total+max(change, 0), 1+max(-change, 0)
 		}
 		mu.Unlock()
+		n := newest - oldest + 1
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 		size, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 		asked := size
 		size = min(size, maxPageSize)
 		var items []string
-		// Newest first: IDs n, n-1, ..., 1.
 		for i := (page - 1) * size; i < min(page*size, n); i++ {
-			items = append(items, folderJSON(n-i, fmt.Sprintf("Root %d", n-i), 7))
+			items = append(items, folderJSON(newest-i, fmt.Sprintf("Root %d", newest-i), 7))
 		}
 		fmt.Fprintf(w, `{"folders": [%s], "page": %d, "page_size": %d, "total_count": %d}`,
 			strings.Join(items, ","), page, reportedSize(asked), n)
@@ -486,20 +556,34 @@ func newGrowingRootFolderServer(t *testing.T, total, maxPageSize int, reportedSi
 	return client
 }
 
-func TestListAllRootFoldersByPageCatchesShiftedFolders(t *testing.T) {
+func TestListAllRootFoldersByPageWhileFoldersChange(t *testing.T) {
+	asAsked := func(asked int) int { return asked }
 	tests := []struct {
 		name         string
+		total        int
+		change       int
 		maxPageSize  int
 		reportedSize func(int) int
+		wantRequests int
 	}{
-		{name: "folder created while listing", maxPageSize: 100, reportedSize: func(asked int) int { return asked }},
-		{name: "unreported page size cap", maxPageSize: 50, reportedSize: func(int) int { return 0 }},
-		{name: "page size cap reported as asked", maxPageSize: 50, reportedSize: func(asked int) int { return asked }},
+		// Folder 1 is pushed to page 3, which is short: no request past it.
+		{name: "folder created while listing", total: 200, change: 1, maxPageSize: 100, reportedSize: asAsked, wantRequests: 3},
+		{name: "unreported page size cap", total: 200, change: 1, maxPageSize: 50, reportedSize: func(int) int { return 0 }, wantRequests: 5},
+		{name: "page size cap reported as asked", total: 200, change: 1, maxPageSize: 50, reportedSize: asAsked, wantRequests: 5},
+		// Folders 1 and 2 are pushed to page 3 by the shift.
+		{name: "two folders created", total: 199, change: 2, maxPageSize: 100, reportedSize: asAsked, wantRequests: 3},
+		// The total stays at 200 from page 1, but page 2 is short.
+		{name: "folder deleted while listing", total: 200, change: -1, maxPageSize: 100, reportedSize: asAsked, wantRequests: 2},
+		{name: "unchanged", total: 200, maxPageSize: 100, reportedSize: asAsked, wantRequests: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := newGrowingRootFolderServer(t, 200, tt.maxPageSize, tt.reportedSize)
-			folders, err := ListAllRootFolders(context.Background(), client, nil)
+			requests := 0
+			client := newChangingRootFolderServer(t, tt.total, tt.change, tt.maxPageSize, tt.reportedSize, &requests)
+			var progress []int
+			folders, err := ListAllRootFolders(context.Background(), client, func(fetched, total int) {
+				progress = append(progress, fetched)
+			})
 			if err != nil {
 				t.Fatalf("ListAllRootFolders() failed: %v", err)
 			}
@@ -510,10 +594,19 @@ func TestListAllRootFoldersByPageCatchesShiftedFolders(t *testing.T) {
 				}
 				seen[f.ID] = true
 			}
-			// Every folder that existed when the listing started is there.
-			for id := 1; id <= 200; id++ {
+			// Every folder that existed when the listing started, and still
+			// exists, is there.
+			for id := 1 + max(-tt.change, 0); id <= tt.total; id++ {
 				if !seen[id] {
 					t.Errorf("folder %d is missing", id)
+				}
+			}
+			if requests != tt.wantRequests {
+				t.Errorf("got %d requests, want %d", requests, tt.wantRequests)
+			}
+			for i := 1; i < len(progress); i++ {
+				if progress[i] <= progress[i-1] {
+					t.Errorf("progress went from %d to %d: %v", progress[i-1], progress[i], progress)
 				}
 			}
 		})

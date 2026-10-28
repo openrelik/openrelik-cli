@@ -574,6 +574,8 @@ func TestListAllRootFoldersByPageWhileFoldersChange(t *testing.T) {
 		{name: "two folders created", total: 199, change: 2, maxPageSize: 100, reportedSize: asAsked, wantRequests: 3},
 		// The total stays at 200 from page 1, but page 2 is short.
 		{name: "folder deleted while listing", total: 200, change: -1, maxPageSize: 100, reportedSize: asAsked, wantRequests: 2},
+		// The only folder on page 3 is deleted, so page 3 comes back empty.
+		{name: "last page emptied while listing", total: 201, change: -1, maxPageSize: 100, reportedSize: asAsked, wantRequests: 3},
 		{name: "unchanged", total: 200, maxPageSize: 100, reportedSize: asAsked, wantRequests: 2},
 	}
 	for _, tt := range tests {

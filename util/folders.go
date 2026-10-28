@@ -172,27 +172,26 @@ func listRootFoldersByPage(ctx context.Context, client *openrelik.Client, first 
 	}
 	pages = pages[:cap(pages)]
 
-	// fetched counts distinct folders, so that progress never repeats or goes
-	// back when a shifted folder is served twice.
+	// fetched counts distinct folders, and progress is only reported when it
+	// grows, so it never repeats or goes back when a shifted folder is served
+	// twice or a page comes back empty.
 	var mu sync.Mutex
 	seen := make(map[int]bool, first.TotalCount)
 	fetched, total := 0, first.TotalCount
 	count := func(page []openrelik.Folder) {
+		before := fetched
 		for _, f := range page {
 			if !seen[f.ID] {
 				seen[f.ID] = true
 				fetched++
 			}
 		}
-	}
-	report := func() {
-		if progress != nil {
+		if progress != nil && fetched > before {
 			// A folder deleted while listing can leave the total behind.
 			progress(min(fetched, total), total)
 		}
 	}
 	count(first.Folders)
-	report()
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(rootFolderFetchers)
 	for i := 1; i < len(pages); i++ {
@@ -204,9 +203,8 @@ func listRootFoldersByPage(ctx context.Context, client *openrelik.Client, first 
 			mu.Lock()
 			defer mu.Unlock()
 			pages[i] = result.Folders
-			count(result.Folders)
 			total = max(total, result.TotalCount)
-			report()
+			count(result.Folders)
 			return nil
 		})
 	}
@@ -240,12 +238,9 @@ func listRootFoldersByPage(ctx context.Context, client *openrelik.Client, first 
 			return nil, err
 		}
 		add(result.Folders)
-		count(result.Folders)
 		total = result.TotalCount
+		count(result.Folders)
 		last = len(result.Folders)
-		if last > 0 {
-			report()
-		}
 	}
 	return folders, nil
 }

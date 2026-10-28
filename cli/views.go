@@ -357,24 +357,56 @@ type folderContents struct {
 }
 
 func (v *FolderContentsView) RenderHuman(w io.Writer) error {
+	return (&folderRowWriter{w: w}).write(v.Entries)
+}
+
+// folderRowWriter writes the rows of a folder listing, possibly in batches as
+// they arrive. The display name, the only column without a bounded width,
+// comes last, so rows of later batches line up with earlier ones. The other
+// columns are as wide as the widest value so far.
+type folderRowWriter struct {
+	w io.Writer
+	// minIDWidth is the narrowest the ID column gets.
+	minIDWidth int
+	widths     [4]int
+	headerDone bool
+}
+
+func (rw *folderRowWriter) write(entries []listEntry) error {
 	// Like 'ls', an empty folder prints nothing.
-	if len(v.Entries) == 0 {
+	if len(entries) == 0 {
 		return nil
 	}
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tDISPLAY NAME\tSIZE\tTYPE\tUPDATED")
-	for _, e := range v.Entries {
+	rows := make([][5]string, 0, len(entries)+1)
+	if !rw.headerDone {
+		rw.headerDone = true
+		rw.widths[0] = rw.minIDWidth
+		rows = append(rows, [5]string{"ID", "UPDATED", "SIZE", "TYPE", "DISPLAY NAME"})
+	}
+	for _, e := range entries {
 		if f := e.folder; f != nil {
-			fmt.Fprintf(tw, "%d\t%s/\t-\tfolder\t%s\n",
-				f.ID, f.DisplayName, util.FormatTime(f.UpdatedAt))
+			rows = append(rows, [5]string{strconv.Itoa(f.ID), util.FormatTime(f.UpdatedAt), "-", "folder", f.DisplayName + "/"})
 			continue
 		}
 		f := e.file
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n",
-			f.ID, f.DisplayName, util.FormatBytes(f.Filesize),
-			f.DataType, util.FormatTime(f.UpdatedAt))
+		rows = append(rows, [5]string{strconv.Itoa(f.ID), util.FormatTime(f.UpdatedAt),
+			util.FormatBytes(f.Filesize), f.DataType, f.DisplayName})
 	}
-	return tw.Flush()
+	for _, row := range rows {
+		for i := range rw.widths {
+			rw.widths[i] = max(rw.widths[i], len(row[i]))
+		}
+	}
+	var b strings.Builder
+	for _, row := range rows {
+		for i, width := range rw.widths {
+			fmt.Fprintf(&b, "%-*s  ", width, row[i])
+		}
+		b.WriteString(row[4])
+		b.WriteByte('\n')
+	}
+	_, err := io.WriteString(rw.w, b.String())
+	return err
 }
 
 func (v *FolderContentsView) RenderVerbose(w io.Writer) error {

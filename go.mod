@@ -4,7 +4,7 @@ go 1.24.2
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/openrelik/openrelik-go-client v0.4.1
+	github.com/openrelik/openrelik-go-client v0.4.3
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	golang.org/x/sync v0.16.0

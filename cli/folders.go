@@ -206,12 +206,13 @@ func resolveFolder(ctx context.Context, client *openrelik.Client, arg string) (i
 
 // folderMatch is a folder found while resolving a path, with the names of
 // the folders leading to it and the number of path segments they used up.
-// folded is set when any of the names only matched case-insensitively.
+// inexact is set when any of the names matched only after ignoring case or
+// extra '/' in the name.
 type folderMatch struct {
-	folder openrelik.Folder
-	path   []string
-	used   int
-	folded bool
+	folder  openrelik.Folder
+	path    []string
+	used    int
+	inexact bool
 }
 
 func (m folderMatch) location() string { return formatFolderPath(m.path) }
@@ -231,7 +232,8 @@ func (e notFoundError) Error() string { return string(e) }
 // ambiguous if more than one complete path matches. Folder names may contain
 // '/', so a name can match several segments: "foo/bar/123" finds a root
 // folder named "foo/bar/123" as well as folder 123 inside foo/bar.
-// Names match case-insensitively, but paths that match exactly win.
+// Names match ignoring case and extra '/', but paths whose names match
+// exactly win.
 func resolveFolderPath(ctx context.Context, client *openrelik.Client, path string) (int, error) {
 	segments := pathSegments(path)
 	if len(segments) == 0 {
@@ -251,7 +253,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 	if len(matches) == 0 {
 		return 0, folderNotFound(segments, reached)
 	}
-	matches = preferExact(matches, func(m folderMatch) bool { return m.folded })
+	matches = preferExact(matches, func(m folderMatch) bool { return m.inexact })
 	if len(matches) > 1 {
 		return 0, ambiguousFolderError(path, matches)
 	}
@@ -298,10 +300,9 @@ func folderNotFound(segments []string, reached []folderMatch) error {
 	return notFoundError(fmt.Sprintf("no folder named %q in %s", segments[matched], formatFolderPath(segments[:matched])))
 }
 
-// preferExact drops the matches that needed case folding, unless all of
-// them did.
-func preferExact[T any](matches []T, folded func(T) bool) []T {
-	if exact := slices.DeleteFunc(slices.Clone(matches), folded); len(exact) > 0 {
+// preferExact drops the inexact matches, unless all of them are.
+func preferExact[T any](matches []T, inexact func(T) bool) []T {
+	if exact := slices.DeleteFunc(slices.Clone(matches), inexact); len(exact) > 0 {
 		return exact
 	}
 	return matches
@@ -318,8 +319,9 @@ func pathSegments(path string) []string {
 	return segments
 }
 
-// matchFolderNames returns the folders whose names match, ignoring case,
-// the path segments following those parent used up.
+// matchFolderNames returns the folders whose names match, ignoring case and
+// extra '/', the path segments following those parent used up. A match is
+// exact only if the name is the same text as those segments.
 func matchFolderNames(folders []openrelik.Folder, segments []string, parent folderMatch) []folderMatch {
 	rest := segments[parent.used:]
 	var matches []folderMatch
@@ -329,10 +331,10 @@ func matchFolderNames(folders []openrelik.Folder, segments []string, parent fold
 			continue
 		}
 		matches = append(matches, folderMatch{
-			folder: f,
-			path:   append(slices.Clone(parent.path), f.DisplayName),
-			used:   parent.used + len(name),
-			folded: parent.folded || !slices.Equal(name, rest[:len(name)]),
+			folder:  f,
+			path:    append(slices.Clone(parent.path), f.DisplayName),
+			used:    parent.used + len(name),
+			inexact: parent.inexact || f.DisplayName != strings.Join(rest[:len(name)], "/"),
 		})
 	}
 	return matches

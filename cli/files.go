@@ -253,11 +253,12 @@ func resolveFile(ctx context.Context, client *openrelik.Client, arg string) (int
 }
 
 // fileMatch is a file found while resolving a path, with the folder it is
-// in. folded is set when any of the names only matched case-insensitively.
+// in. inexact is set when any of the names matched only after ignoring case
+// or extra '/' in the name.
 type fileMatch struct {
-	file   openrelik.FolderFile
-	folder folderMatch
-	folded bool
+	file    openrelik.FolderFile
+	folder  folderMatch
+	inexact bool
 }
 
 // resolveFilePath resolves a path whose folders are resolved as by 'folder
@@ -265,7 +266,7 @@ type fileMatch struct {
 // too, so every folder the path leads through is checked for a file named
 // the rest of the path: "Case A/a/b.txt" finds a file named "a/b.txt" in
 // Case A as well as b.txt in Case A/a/. As for folders, names match
-// case-insensitively, but paths that match exactly win.
+// ignoring case and extra '/', but paths whose names match exactly win.
 func resolveFilePath(ctx context.Context, client *openrelik.Client, arg string) (fileMatch, error) {
 	i := strings.LastIndex(arg, "/")
 	if i < 0 || strings.Trim(arg[:i], "/") == "" {
@@ -290,13 +291,13 @@ func resolveFilePath(ctx context.Context, client *openrelik.Client, arg string) 
 			return fileMatch{}, err
 		}
 		rest := segments[folder.used:]
+		exactName := strings.Join(rest, "/")
 		for _, f := range files {
-			fileName := pathSegments(f.DisplayName)
-			if slices.EqualFunc(fileName, rest, strings.EqualFold) {
+			if slices.EqualFunc(pathSegments(f.DisplayName), rest, strings.EqualFold) {
 				matches = append(matches, fileMatch{
-					file:   f,
-					folder: folder,
-					folded: folder.folded || !slices.Equal(fileName, rest),
+					file:    f,
+					folder:  folder,
+					inexact: folder.inexact || f.DisplayName != exactName,
 				})
 			}
 		}
@@ -308,7 +309,7 @@ func resolveFilePath(ctx context.Context, client *openrelik.Client, arg string) 
 		}
 		return fileMatch{}, notFoundError(fmt.Sprintf("no file named %q in %s/", name, strings.TrimRight(dir, "/")))
 	}
-	matches = preferExact(matches, func(m fileMatch) bool { return m.folded })
+	matches = preferExact(matches, func(m fileMatch) bool { return m.inexact })
 	if len(matches) > 1 {
 		return fileMatch{}, ambiguousFileError(arg, matches)
 	}

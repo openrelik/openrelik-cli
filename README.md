@@ -215,7 +215,7 @@ openrelik download "Case A/evidence/notes.txt"
 Inspect and print forensic files.
 
 *   `file info <FILE>`: Return file metadata including size, hashes, and MIME type. `FILE` is a file ID or a path, as for `file cat`.
-*   `file cat <FILE> [FILE...]`: Print file contents to stdout. FILE is a file ID or a path of folder names ending in the file name, such as `"Case A/evidence/notes.txt"`. Several files are concatenated in the order given. Use `-n` to number the lines, like `cat -n`, and `-c N` (e.g. `512`, `4K`, `10M`) to print only the first N bytes of each file; the download stops once they have been read. Files that look binary are refused when stdout is a terminal; pipe or redirect the output to print them anyway. Every part of a path is a name, so `42/notes.txt` looks in a root folder named `42`, not folder 42; use the file ID instead.
+*   `file cat <FILE> [FILE...]`: Print file contents to stdout. FILE is a file ID or a path of folder names ending in the file name, such as `"Case A/evidence/notes.txt"`. File names may contain `/`, so `Case A/2024/report.txt` also finds a file named `2024/report.txt` in `Case A`. Several files are concatenated in the order given. Use `-n` to number the lines, like `cat -n`, and `-c N` (e.g. `512`, `4K`, `10M`) to print only the first N bytes of each file; the download stops once they have been read. Files that look binary are refused when stdout is a terminal; pipe or redirect the output to print them anyway. Every part of a path is a name, so `42/notes.txt` looks in a root folder named `42`, not folder 42; use the file ID instead.
 
 #### Example
 

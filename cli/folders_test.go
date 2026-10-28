@@ -592,6 +592,7 @@ func TestFolderListFilesError(t *testing.T) {
 //	/a/ (7)             /b/ (71), /B/ (72)
 //	/a/b/ (8)
 //	/CASE A/ (9)        /logs/ (91)
+//	/x/ (10), /x// (12)
 //
 // Every folder is empty of files. Requested subfolder listings are recorded.
 func newFolderTreeServer(t *testing.T, listed *[]string) *httptest.Server {
@@ -614,8 +615,9 @@ func newFolderTreeServer(t *testing.T, listed *[]string) *httptest.Server {
 		switch {
 		case r.URL.Path == "/api/v1/folders/all/":
 			roots := []string{folder(1, "Case A"), folder(2, "dup"), folder(3, "dup"), folder(4, "42"),
-				folder(5, "foo/bar/123"), folder(6, "split"), folder(7, "a"), folder(8, "a/b"), folder(9, "CASE A")}
-			fmt.Fprintf(w, `{"folders": [%s], "page": 1, "page_size": 100, "total_count": 9}`, strings.Join(roots, ","))
+				folder(5, "foo/bar/123"), folder(6, "split"), folder(7, "a"), folder(8, "a/b"), folder(9, "CASE A"),
+				folder(10, "x"), folder(12, "x//")}
+			fmt.Fprintf(w, `{"folders": [%s], "page": 1, "page_size": 100, "total_count": 11}`, strings.Join(roots, ","))
 		case len(parts) == 5 && parts[4] == "folders":
 			*listed = append(*listed, parts[3])
 			fmt.Fprintf(w, "[%s]", strings.Join(children[parts[3]], ","))
@@ -657,6 +659,7 @@ func TestFolderListByPath(t *testing.T) {
 			arg:     "A/B/",
 			wantErr: []string{`multiple folders match "A/B/"`, "\n8 ", "\n71 ", "\n72 "},
 		},
+		{name: "exact name wins over one with extra slashes", arg: "x/", wantFolder: "10"},
 		{name: "exact parent doesn't hide a case-insensitive one", arg: "Case A/logs/", wantFolder: "91"},
 		{
 			name:    "duplicate root names",

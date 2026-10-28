@@ -97,7 +97,7 @@ func (s *shareServer) handle(w http.ResponseWriter, r *http.Request) {
 	case path == "/folders/43/folders/":
 		fmt.Fprint(w, `[]`)
 	case path == "/folders/42/files/":
-		fmt.Fprint(w, `[]`)
+		fmt.Fprint(w, `[{"id": 10, "display_name": "2024/report.txt"}]`)
 	case path == "/folders/43/files/":
 		fmt.Fprint(w, `[{"id": 9, "display_name": "notes.txt"}]`)
 	case path == "/files/9":
@@ -520,6 +520,8 @@ func TestFileShareHint(t *testing.T) {
 			"openrelik folder unshare 43 --user alice"},
 		{[]string{"folder", "access", "Case A/evidence/notes.txt"},
 			"openrelik folder access 'Case A/evidence/'"},
+		{[]string{"folder", "access", "case a/2024/report.txt"},
+			"openrelik folder access 'Case A/'"},
 	} {
 		_, _, err := runShare(t, s, "", tc.args...)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

@@ -350,6 +350,8 @@ func newDownloadCmd() *cobra.Command {
 
 FILE is either a file ID, as shown by 'folder list <FOLDER>', or a path
 of folder names ending in the file name, such as 'Case A/evidence/notes.txt'.
+File names may contain '/' too: 'Case A/2024/report.txt' also finds a
+file named "2024/report.txt" in Case A.
 If more than one file matches a path, the matches are listed so you can
 pick one by ID.
 

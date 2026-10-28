@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,8 @@ and timestamps.
 
 FILE is either a file ID, as shown by 'folder list <FOLDER>', or a path
 of folder names ending in the file name, such as 'Case A/evidence/notes.txt'.
+File names may contain '/' too: 'Case A/2024/report.txt' also finds a
+file named "2024/report.txt" in Case A.
 If more than one file matches a path, the matches are listed so you can
 pick one by ID.
 
@@ -108,6 +111,8 @@ concatenated in the order given, and the command stops at the first failure.
 
 FILE is either a file ID, as shown by 'folder list <FOLDER>', or a path
 of folder names ending in the file name, such as 'Case A/evidence/notes.txt'.
+File names may contain '/' too: 'Case A/2024/report.txt' also finds a
+file named "2024/report.txt" in Case A.
 Folders in the path are matched as by 'folder list'. If more than one file
 matches a path, the matches are listed so you can pick one by ID.
 Every part of a path is a name, starting at the root folders, so
@@ -231,8 +236,7 @@ func (l *lineNumberWriter) Write(p []byte) (int, error) {
 
 // resolveFile turns a file argument into a file ID. Arguments made only of
 // digits are IDs; anything else is a path like "Case A/evidence/notes.txt",
-// whose folders are resolved as by 'folder list' and whose last segment is
-// the file name.
+// resolved by resolveFilePath.
 func resolveFile(ctx context.Context, client *openrelik.Client, arg string) (int, error) {
 	if folderIDPattern.MatchString(arg) {
 		id, err := strconv.Atoi(arg)
@@ -241,62 +245,90 @@ func resolveFile(ctx context.Context, client *openrelik.Client, arg string) (int
 		}
 		return id, nil
 	}
+	m, err := resolveFilePath(ctx, client, arg)
+	if err != nil {
+		return 0, err
+	}
+	return m.file.ID, nil
+}
 
+// fileMatch is a file found while resolving a path, with the folder it is
+// in. inexact is set when any of the names matched only after ignoring case
+// or extra '/' in the name.
+type fileMatch struct {
+	file    openrelik.FolderFile
+	folder  folderMatch
+	inexact bool
+}
+
+// resolveFilePath resolves a path whose folders are resolved as by 'folder
+// list' and whose last segment is the file name. File names may contain '/'
+// too, so every folder the path leads through is checked for a file named
+// the rest of the path: "Case A/a/b.txt" finds a file named "a/b.txt" in
+// Case A as well as b.txt in Case A/a/. As for folders, names match
+// ignoring case and extra '/', but paths whose names match exactly win.
+func resolveFilePath(ctx context.Context, client *openrelik.Client, arg string) (fileMatch, error) {
 	i := strings.LastIndex(arg, "/")
 	if i < 0 || strings.Trim(arg[:i], "/") == "" {
-		return 0, usageErrorf("invalid file %q: give a file ID or a path such as 'FOLDER/NAME'", arg)
+		return fileMatch{}, usageErrorf("invalid file %q: give a file ID or a path such as 'FOLDER/NAME'", arg)
 	}
 	dir, name := arg[:i], arg[i+1:]
 	if name == "" {
-		return 0, usageErrorf("invalid file %q: the path ends in '/', so it names a folder", arg)
+		return fileMatch{}, usageErrorf("invalid file %q: the path ends in '/', so it names a folder", arg)
 	}
 
-	folderID, err := resolveFolderPath(ctx, client, dir)
+	// The folders leave at least the last segment for the file name.
+	segments := pathSegments(arg)
+	dirSegments := segments[:len(segments)-1]
+	folders, err := walkFolderPath(ctx, client, dirSegments)
 	if err != nil {
-		return 0, err
+		return fileMatch{}, err
 	}
-	files, _, err := client.Folders().ListFiles(ctx, folderID)
-	if err != nil {
-		return 0, err
-	}
-
-	var exact, folded []openrelik.FolderFile
-	for _, f := range files {
-		switch {
-		case f.DisplayName == name:
-			exact = append(exact, f)
-		case strings.EqualFold(f.DisplayName, name):
-			folded = append(folded, f)
+	var matches []fileMatch
+	for _, folder := range folders {
+		files, _, err := client.Folders().ListFiles(ctx, folder.folder.ID)
+		if err != nil {
+			return fileMatch{}, err
+		}
+		rest := segments[folder.used:]
+		exactName := strings.Join(rest, "/")
+		for _, f := range files {
+			if slices.EqualFunc(pathSegments(f.DisplayName), rest, strings.EqualFold) {
+				matches = append(matches, fileMatch{
+					file:    f,
+					folder:  folder,
+					inexact: folder.inexact || f.DisplayName != exactName,
+				})
+			}
 		}
 	}
-	matches := exact
-	if len(matches) == 0 {
-		matches = folded
-	}
 
-	switch len(matches) {
-	case 0:
-		return 0, notFoundError(fmt.Sprintf("no file named %q in %s/", name, strings.TrimRight(dir, "/")))
-	case 1:
-		return matches[0].ID, nil
-	default:
-		return 0, ambiguousFileError(arg, matches)
+	if len(matches) == 0 {
+		if !slices.ContainsFunc(folders, func(m folderMatch) bool { return m.used == len(dirSegments) }) {
+			return fileMatch{}, folderNotFound(dirSegments, folders)
+		}
+		return fileMatch{}, notFoundError(fmt.Sprintf("no file named %q in %s/", name, strings.TrimRight(dir, "/")))
 	}
+	matches = preferExact(matches, func(m fileMatch) bool { return m.inexact })
+	if len(matches) > 1 {
+		return fileMatch{}, ambiguousFileError(arg, matches)
+	}
+	return matches[0], nil
 }
 
 // ambiguousFileError lists the files matching path so the user can pick
 // one by ID.
-func ambiguousFileError(path string, matches []openrelik.FolderFile) error {
+func ambiguousFileError(path string, matches []fileMatch) error {
 	sort.SliceStable(matches, func(i, j int) bool {
-		return matches[i].UpdatedAt.Before(matches[j].UpdatedAt)
+		return matches[i].file.UpdatedAt.Before(matches[j].file.UpdatedAt)
 	})
 	var b strings.Builder
 	fmt.Fprintf(&b, "multiple files match %q:\n\n", path)
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tSIZE\tUPDATED")
-	for _, f := range matches {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\n", f.ID, f.DisplayName,
-			util.FormatBytes(f.Filesize), util.FormatTime(f.UpdatedAt))
+	fmt.Fprintln(tw, "ID\tLOCATION\tNAME\tSIZE\tUPDATED")
+	for _, m := range matches {
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\n", m.file.ID, m.folder.location(), m.file.DisplayName,
+			util.FormatBytes(m.file.Filesize), util.FormatTime(m.file.UpdatedAt))
 	}
 	tw.Flush()
 	b.WriteString("\nUse one of the IDs above instead of the path.")

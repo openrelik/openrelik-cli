@@ -25,8 +25,10 @@ import (
 //
 // It also serves a folder tree for resolving paths:
 //
-//	/Case A/            (1)  notes.txt (1), dup.txt (2), dup.txt (3)
-//	/Case A/evidence/   (11) disk.bin (3)
+//	/Case A/            (1)  notes.txt (1), dup.txt (2), dup.txt (3),
+//	                         2024/report.txt (4), Evidence/Notes.txt (5),
+//	                         logs//app.log (8)
+//	/Case A/evidence/   (11) disk.bin (3), notes.txt (6), /notes.txt (7)
 func newCatServer(t *testing.T, contents map[int]string, requests *int) *httptest.Server {
 	t.Helper()
 	folder := func(id int, name string) string {
@@ -37,8 +39,9 @@ func newCatServer(t *testing.T, contents map[int]string, requests *int) *httptes
 	}
 	subfolders := map[string][]string{"1": {folder(11, "evidence")}}
 	files := map[string][]string{
-		"1":  {file(1, "notes.txt"), file(2, "dup.txt"), file(3, "dup.txt")},
-		"11": {file(3, "disk.bin")},
+		"1": {file(1, "notes.txt"), file(2, "dup.txt"), file(3, "dup.txt"),
+			file(4, "2024/report.txt"), file(5, "Evidence/Notes.txt"), file(8, "logs//app.log")},
+		"11": {file(3, "disk.bin"), file(6, "notes.txt"), file(7, "/notes.txt")},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
@@ -117,7 +120,8 @@ const (
 var catLargeText = strings.Repeat("line of text\n", 2*binaryPeekSize/13)
 
 func catContents() map[int]string {
-	return map[int]string{1: catText, 2: "second\n", 3: catBinary, 4: catLargeText}
+	return map[int]string{1: catText, 2: "second\n", 3: catBinary, 4: catLargeText,
+		5: "fifth\n", 6: "evidence notes\n", 7: "slashed notes\n", 8: "app log\n"}
 }
 
 func TestFileCat(t *testing.T) {
@@ -135,6 +139,9 @@ func TestFileCat(t *testing.T) {
 		{name: "path", args: []string{"Case A/notes.txt"}, want: catText},
 		{name: "path with leading slash", args: []string{"/Case A/evidence/disk.bin"}, want: catBinary},
 		{name: "case-insensitive path", args: []string{"case a/NOTES.TXT"}, want: catText},
+		{name: "file name containing a slash", args: []string{"Case A/2024/report.txt"}, want: catLargeText},
+		{name: "exact path wins over inexact names", args: []string{"Case A/evidence/notes.txt"}, want: "evidence notes\n"},
+		{name: "name with extra slashes", args: []string{"Case A/logs/app.log"}, want: "app log\n"},
 		{name: "paths and IDs mixed", args: []string{"2", "/Case A/notes.txt"}, want: "second\n" + catText},
 		{name: "number lines", args: []string{"-n", "1"}, want: "     1\thello\n     2\tworld\n"},
 		{name: "numbering continues across files", args: []string{"1", "--number", "2"}, want: "     1\thello\n     2\tworld\n     3\tsecond\n"},
@@ -207,8 +214,14 @@ func TestFileCatErrors(t *testing.T) {
 		{
 			name:    "duplicate file names",
 			args:    []string{"1", "Case A/dup.txt"},
-			wantErr: "multiple files match \"Case A/dup.txt\":\n\nID  NAME     SIZE  UPDATED\n2   dup.txt  7B",
+			wantErr: "multiple files match \"Case A/dup.txt\":\n\nID  LOCATION  NAME     SIZE  UPDATED\n2   /Case A/  dup.txt  7B",
 		},
+		{
+			name:    "file name with a slash or folder and file",
+			args:    []string{"case a/evidence/notes.txt"},
+			wantErr: "ID  LOCATION           NAME                SIZE  UPDATED\n5   /Case A/           Evidence/Notes.txt  6B    -\n6   /Case A/evidence/  notes.txt           15B   -\n7   /Case A/evidence/  /notes.txt          14B   -",
+		},
+		{name: "unknown folder before a file name", args: []string{"Case A/2023/report.txt"}, wantErr: `no folder named "2023" in /Case A/`},
 		{name: "no argument", args: nil, wantErr: "missing required argument: FILE"},
 	}
 	for _, tt := range tests {

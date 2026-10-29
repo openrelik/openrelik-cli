@@ -51,7 +51,7 @@ func TestResolveInputs(t *testing.T) {
 		client, _ := openrelik.NewClient(server.URL, "test-key")
 		ctx := context.Background()
 
-		ids, total, err := ResolveInputs(ctx, client, noServerPaths, []string{"123", "456"}, false, 0, "")
+		ids, total, err := ResolveInputs(ctx, client, noServerPaths, nil, []string{"123", "456"}, false, 0, "")
 		if err != nil {
 			t.Fatalf("ResolveInputs failed: %v", err)
 		}
@@ -81,7 +81,7 @@ func TestResolveInputs(t *testing.T) {
 			}
 		})
 
-		ids, total, err := ResolveInputs(ctx, client, noServerPaths, []string{tmpFile}, false, 123, "")
+		ids, total, err := ResolveInputs(ctx, client, noServerPaths, nil, []string{tmpFile}, false, 123, "")
 		if err != nil {
 			t.Fatalf("ResolveInputs failed: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestResolveInputs(t *testing.T) {
 			}
 		})
 
-		ids, total, err := ResolveInputs(ctx, client, noServerPaths, []string{tmpFile}, false, 0, "Custom Folder")
+		ids, total, err := ResolveInputs(ctx, client, noServerPaths, nil, []string{tmpFile}, false, 0, "Custom Folder")
 		if err != nil {
 			t.Fatalf("ResolveInputs failed: %v", err)
 		}
@@ -157,7 +157,7 @@ func TestResolveInputs(t *testing.T) {
 			}
 		})
 
-		ids, total, err := ResolveInputs(ctx, client, noServerPaths, []string{tmpFile}, false, 0, "")
+		ids, total, err := ResolveInputs(ctx, client, noServerPaths, nil, []string{tmpFile}, false, 0, "")
 		if err != nil {
 			t.Fatalf("ResolveInputs failed: %v", err)
 		}
@@ -176,7 +176,7 @@ func TestResolveInputs(t *testing.T) {
 		client, _ := openrelik.NewClient(server.URL, "test-key")
 		ctx := context.Background()
 
-		_, _, err := ResolveInputs(ctx, client, noServerPaths, []string{"not-a-file-and-not-an-id"}, false, 0, "")
+		_, _, err := ResolveInputs(ctx, client, noServerPaths, nil, []string{"not-a-file-and-not-an-id"}, false, 0, "")
 		if err == nil {
 			t.Fatal("Expected error for invalid input, got nil")
 		}
@@ -536,7 +536,7 @@ func TestResolveInputsServerPaths(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// No server: these inputs must not need one.
-			got, _, err := ResolveInputs(ctx, nil, resolve, tt.args, false, 0, "")
+			got, _, err := ResolveInputs(ctx, nil, resolve, nil, tt.args, false, 0, "")
 			if tt.wantErr != "" {
 				if err == nil || err.Error() != tt.wantErr {
 					t.Fatalf("error = %v, want %q", err, tt.wantErr)
@@ -560,7 +560,7 @@ func TestResolveInputsServerPaths(t *testing.T) {
 			return 1, nil
 		}
 		// The upload fails without a server; only the check matters here.
-		ResolveInputs(ctx, uploadServer(t, `[]`, nil), resolve, []string{"./Case A/local.bin"}, false, 40, "")
+		ResolveInputs(ctx, uploadServer(t, `[]`, nil), resolve, nil, []string{"./Case A/local.bin"}, false, 40, "")
 		if asked {
 			t.Error("the server was asked about ./Case A/local.bin")
 		}
@@ -620,7 +620,7 @@ func TestResolveInputsReusesUploads(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			uploads := 0
 			client := uploadServer(t, tt.files, tt.hashes, &uploads)
-			ids, total, err := ResolveInputs(context.Background(), client, noServerPaths, []string{path}, false, 40, "")
+			ids, total, err := ResolveInputs(context.Background(), client, noServerPaths, nil, []string{path}, false, 40, "")
 			// The mock doesn't hash uploads, so only reused files verify.
 			if tt.wantUploads == 0 && err != nil {
 				t.Fatalf("ResolveInputs failed: %v", err)
@@ -656,7 +656,7 @@ func TestResolveInputsUploadsSameFileOnce(t *testing.T) {
 	os.WriteFile(path, []byte("hello"), 0o644)
 	uploads := 0
 	client := uploadServer(t, `[]`, map[int]string{900: helloSHA256}, &uploads)
-	ids, total, err := ResolveInputs(context.Background(), client, noServerPaths, []string{path, dir + "/./disk.E01"}, false, 40, "")
+	ids, total, err := ResolveInputs(context.Background(), client, noServerPaths, nil, []string{path, dir + "/./disk.E01"}, false, 40, "")
 	if err != nil {
 		t.Fatalf("ResolveInputs failed: %v", err)
 	}

@@ -19,6 +19,7 @@ func newTreeFoldersCmd() *cobra.Command {
 	var level int
 	var foldersOnly bool
 	var showSize bool
+	var caseRef string
 
 	cmd := &cobra.Command{
 		Use:   "tree [FOLDER]",
@@ -34,7 +35,11 @@ scan. ('folder list' and 'folder search' sort by last update instead, like
 'ls -latr'.) Use --sort time to sort by last update (oldest first) and -r to
 reverse the order. Use --level N to limit the depth and
 --folders-only to leave out files, which also makes large trees faster to
-fetch. Use --size to show file sizes.`,
+fetch. Use --size to show file sizes.
+
+With --case REF, shows the case folder of case REF (see 'case
+create'), or with FOLDER, a folder inside it: a path from the case
+folder, or the ID of a folder in the case.`,
 		Example: `  # Show everything below folder 42
   openrelik folder tree 42
 
@@ -45,7 +50,10 @@ fetch. Use --size to show file sizes.`,
   openrelik folder tree 42 --size
 
   # Show only the folder structure of all root folders
-  openrelik folder tree --folders-only`,
+  openrelik folder tree --folders-only
+
+  # Show the case folder of case-123
+  openrelik folder tree --case case-123`,
 		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := opts.validate(); err != nil {
@@ -63,14 +71,25 @@ fetch. Use --size to show file sizes.`,
 			root := &treeNode{}
 			var frontier []*treeNode
 			depth := 1
-			if len(args) > 0 {
-				fID, err := resolveFolder(cmd.Context(), client, args[0])
-				if err != nil {
+			var fID int
+			var caseFolder *openrelik.Folder
+			if cmd.Flags().Changed("case") {
+				if caseFolder, err = lookupCase(cmd, client, caseRef); err != nil {
 					return err
 				}
-				folder, _, err := client.Folders().Get(cmd.Context(), fID)
-				if err != nil {
+				fID = caseFolder.ID
+			}
+			if len(args) > 0 {
+				if fID, err = resolveFolderIn(cmd.Context(), client, caseFolder, args[0]); err != nil {
 					return err
+				}
+			}
+			if fID != 0 {
+				folder := caseFolder
+				if caseFolder == nil || fID != caseFolder.ID {
+					if folder, _, err = client.Folders().Get(cmd.Context(), fID); err != nil {
+						return err
+					}
 				}
 				folder.Parent = nil
 				root.folder = folder
@@ -107,6 +126,7 @@ fetch. Use --size to show file sizes.`,
 	cmd.Flags().IntVar(&level, "level", 0, "Maximum depth to show (0 shows all levels)")
 	cmd.Flags().BoolVar(&foldersOnly, "folders-only", false, "Show folders only, not files")
 	cmd.Flags().BoolVar(&showSize, "size", false, "Show file sizes")
+	cmd.Flags().StringVar(&caseRef, "case", "", "Show the case folder of case `REF`, or FOLDER inside it")
 	return cmd
 }
 

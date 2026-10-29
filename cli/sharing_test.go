@@ -540,7 +540,7 @@ func TestFolderListShared(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list --shared failed: %v", err)
 	}
-	if !strings.Contains(stdout, "OWNER") || !strings.Contains(stdout, "50  From Bob/     bob") {
+	if !strings.Contains(stdout, "OWNER") || !strings.Contains(stdout, "50  From Bob/     -     bob") {
 		t.Errorf("unexpected output:\n%s", stdout)
 	}
 

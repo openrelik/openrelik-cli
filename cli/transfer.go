@@ -21,7 +21,7 @@ import (
 // Top-level commands that move data between the local machine and OpenRelik.
 
 func newUploadCmd() *cobra.Command {
-	var name string
+	var name, caseRef string
 	var chunkSize, maxDepth int
 	var force bool
 
@@ -43,6 +43,10 @@ created instead, since files can't be stored directly at the root. A
 single directory becomes the new root folder itself; anything else goes
 into a root folder named after the current time, e.g.
 "Upload 2026-10-27 14:05 UTC". Use --name to choose the name.
+
+With --case REF, files go into the case folder of case REF (see 'case
+create'), or into FOLDER inside it: a path from the case folder, or
+the ID of a folder in the case. No root folder is created.
 
 Files given directly are skipped if FOLDER already holds a file with the
 same name and SHA256, so an interrupted upload can be run again. If the
@@ -66,6 +70,12 @@ hasn't hashed (yet) are reported as not verified.`,
   # Upload files into a new root folder with a chosen name
   openrelik upload disk.E01 memory.raw / --name "Case 2026-001"
 
+  # Upload a file into the case folder of case-123
+  openrelik upload disk.E01 --case case-123
+
+  # Upload a directory into the folder "evidence" of case-123
+  openrelik upload logs/ evidence/ --case case-123
+
   # Use a larger chunk size (bytes) for fast networks
   openrelik upload large.bin 42 --chunk-size 8388608`,
 		Args: util.UseArgs(),
@@ -82,7 +92,14 @@ hasn't hashed (yet) are reported as not verified.`,
 			if n := len(args); n > 1 {
 				sources, dest = args[:n-1], args[n-1]
 			}
-			newRoot := dest == "" || dest == "/"
+			withCase := cmd.Flags().Changed("case")
+			if withCase && dest == "/" {
+				return usageErrorf(`--case uploads into the case folder, so FOLDER can't be "/"`)
+			}
+			if withCase && name != "" {
+				return usageErrorf("--case uploads into the case folder, so it can't be used with --name")
+			}
+			newRoot := !withCase && (dest == "" || dest == "/")
 			if name != "" && !newRoot {
 				return fmt.Errorf(`--name only applies when creating a new root folder (no FOLDER, or FOLDER "/")`)
 			}
@@ -121,13 +138,26 @@ hasn't hashed (yet) are reported as not verified.`,
 			// A single directory becomes the new root folder itself.
 			single := false
 			if !newRoot {
-				view.FolderID, err = resolveFolder(cmd.Context(), client, dest)
+				var caseFolder *openrelik.Folder
+				if withCase {
+					if caseFolder, err = lookupCase(cmd, client, caseRef); err != nil {
+						return err
+					}
+					view.FolderID = caseFolder.ID
+				}
+				if dest != "" {
+					view.FolderID, err = resolveFolderIn(cmd.Context(), client, caseFolder, dest)
+				}
 				if err != nil {
 					// The user may have left out the destination, so the
 					// last file was taken as the folder.
 					var notFound notFoundError
 					if _, statErr := os.Stat(dest); statErr == nil && errors.As(err, &notFound) {
-						return fmt.Errorf("%w\n\nThe last argument is the folder to upload into, but %q is also a local path. Add the destination folder at the end, or \"/\" to create a new root folder.", err, dest)
+						fix := `Add the destination folder at the end, or "/" to create a new root folder.`
+						if withCase {
+							fix = "Add the destination folder at the end, or leave it out to upload into the case folder."
+						}
+						return fmt.Errorf("%w\n\nThe last argument is the folder to upload into, but %q is also a local path. %s", err, dest, fix)
 					}
 					return err
 				}
@@ -198,6 +228,7 @@ hasn't hashed (yet) are reported as not verified.`,
 	}
 
 	cmd.Flags().StringVar(&name, "name", "", `Name of the new root folder (only with no FOLDER, or FOLDER "/")`)
+	cmd.Flags().StringVar(&caseRef, "case", "", "Upload into the case folder of case `REF`, or FOLDER inside it")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Upload files even if FOLDER already holds the same file")
 	cmd.Flags().IntVarP(&maxDepth, "depth", "d", 0, "Maximum subfolder depth to upload (0 uploads all levels)")
 	cmd.Flags().IntVar(&chunkSize, "chunk-size", 4*1024*1024, "Chunk size in bytes")

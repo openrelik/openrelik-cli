@@ -339,6 +339,8 @@ type WorkflowMonitorMeta struct {
 	TaskFolders      bool
 	UploadFolderID   int
 	UploadFolderName string
+	Case             string
+	CaseSet          bool // --case was given, perhaps empty
 	DryRun           bool
 }
 
@@ -369,6 +371,8 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 		meta.TaskFolders, _ = runCmd.Flags().GetBool("task-folders")
 		meta.UploadFolderID, _ = runCmd.Flags().GetInt("upload-folder-id")
 		meta.UploadFolderName, _ = runCmd.Flags().GetString("upload-folder-name")
+		meta.Case, _ = runCmd.Flags().GetString("case")
+		meta.CaseSet = runCmd.Flags().Changed("case")
 		meta.DryRun, _ = runCmd.Flags().GetBool("dry-run")
 	}
 
@@ -417,6 +421,10 @@ func BuildWorkflowSpec(runCmd *cobra.Command, segments [][]string, delimiter str
 		}
 		if tempCmd.Flags().Changed("upload-folder-name") {
 			meta.UploadFolderName, _ = tempCmd.Flags().GetString("upload-folder-name")
+		}
+		if tempCmd.Flags().Changed("case") {
+			meta.Case, _ = tempCmd.Flags().GetString("case")
+			meta.CaseSet = true
 		}
 		if dryRun, _ := tempCmd.Flags().GetBool("dry-run"); dryRun {
 			meta.DryRun = true

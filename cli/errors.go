@@ -242,6 +242,7 @@ var cobraUsageErrors = []string{
 	"unknown worker",
 	"required flag(s)",
 	"if any flags in the group",
+	"at least one of the flags in the group",
 	"unknown flag",
 	"unknown shorthand flag",
 	"invalid argument",

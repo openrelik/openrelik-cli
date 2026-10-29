@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -186,7 +187,7 @@ func (v *FileInfoView) UnwrapJSON() any { return v.File }
 // --- Folders ---
 
 // FolderCreatedView renders a one-line confirmation after folder creation,
-// or after finding an existing folder with 'folder create --exist-ok'.
+// or after finding an existing folder with 'folder create --use-existing'.
 type FolderCreatedView struct {
 	*openrelik.Folder
 	Created bool
@@ -196,6 +197,10 @@ func (v *FolderCreatedView) RenderHuman(w io.Writer) error {
 	verb := "created"
 	if !v.Created {
 		verb = "already exists"
+	}
+	if v.CaseRef != "" {
+		fmt.Fprintf(w, "Case folder %q of case %s %s (ID %d)\n", v.DisplayName, v.CaseRef, verb, v.ID)
+		return nil
 	}
 	fmt.Fprintf(w, "Folder %q %s (ID %d)\n", v.DisplayName, verb, v.ID)
 	return nil
@@ -207,6 +212,31 @@ func (v *FolderCreatedView) UnwrapJSON() any {
 		Created bool `json:"created"`
 	}{v.Folder, v.Created}
 }
+
+// CaseRefUpdatedView renders the result of 'case set' or 'case clear': the
+// folder, and the case reference it had before.
+type CaseRefUpdatedView struct {
+	*openrelik.Folder
+	Previous string
+}
+
+func (v *CaseRefUpdatedView) RenderHuman(w io.Writer) error {
+	switch {
+	case v.CaseRef != "" && v.CaseRef == v.Previous:
+		fmt.Fprintf(w, "Folder %d %q is the case folder of case %s\n", v.ID, v.DisplayName, v.CaseRef)
+	case v.CaseRef != "" && v.Previous != "":
+		fmt.Fprintf(w, "Folder %d %q is now the case folder of case %s, instead of case %s\n", v.ID, v.DisplayName, v.CaseRef, v.Previous)
+	case v.CaseRef != "":
+		fmt.Fprintf(w, "Folder %d %q is now the case folder of case %s\n", v.ID, v.DisplayName, v.CaseRef)
+	case v.Previous != "":
+		fmt.Fprintf(w, "Folder %d %q is no longer the case folder of case %s\n", v.ID, v.DisplayName, v.Previous)
+	default:
+		fmt.Fprintf(w, "Folder %d %q has no case reference\n", v.ID, v.DisplayName)
+	}
+	return nil
+}
+
+func (v *CaseRefUpdatedView) UnwrapJSON() any { return v.Folder }
 
 // UploadView renders the result of 'upload': the root folder it
 // created, if any, and one line per uploaded file.
@@ -348,7 +378,12 @@ func (v *FolderSearchView) UnwrapJSON() any {
 // FolderContentsView renders the subfolders and files of a folder as one
 // table. Folder names get a trailing '/' and TYPE "folder" so they can't be
 // mistaken for files, since folder and file IDs are separate.
-type FolderContentsView struct{ Entries []listEntry }
+type FolderContentsView struct {
+	Entries []listEntry
+	// ShowCase adds a CASE column with the case reference of each folder,
+	// for listings of root folders.
+	ShowCase bool
+}
 
 // folderContents is the JSON shape of a folder listing.
 type folderContents struct {
@@ -357,7 +392,7 @@ type folderContents struct {
 }
 
 func (v *FolderContentsView) RenderHuman(w io.Writer) error {
-	return (&folderRowWriter{w: w}).write(v.Entries)
+	return (&folderRowWriter{w: w, showCase: v.ShowCase}).write(v.Entries)
 }
 
 // folderRowWriter writes the rows of a folder listing, possibly in batches as
@@ -368,7 +403,9 @@ type folderRowWriter struct {
 	w io.Writer
 	// minIDWidth is the narrowest the ID column gets.
 	minIDWidth int
-	widths     [4]int
+	// showCase adds a CASE column before the display name.
+	showCase   bool
+	widths     []int
 	headerDone bool
 }
 
@@ -377,20 +414,34 @@ func (rw *folderRowWriter) write(entries []listEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	rows := make([][5]string, 0, len(entries)+1)
+	var rows [][]string
 	if !rw.headerDone {
 		rw.headerDone = true
+		header := []string{"ID", "UPDATED", "SIZE", "TYPE"}
+		if rw.showCase {
+			header = append(header, "CASE")
+		}
+		rw.widths = make([]int, len(header))
 		rw.widths[0] = rw.minIDWidth
-		rows = append(rows, [5]string{"ID", "UPDATED", "SIZE", "TYPE", "DISPLAY NAME"})
+		rows = append(rows, append(header, "DISPLAY NAME"))
 	}
 	for _, e := range entries {
+		var row []string
 		if f := e.folder; f != nil {
-			rows = append(rows, [5]string{strconv.Itoa(f.ID), util.FormatTime(f.UpdatedAt), "-", "folder", f.DisplayName + "/"})
-			continue
+			row = []string{strconv.Itoa(f.ID), util.FormatTime(f.UpdatedAt), "-", "folder"}
+			if rw.showCase {
+				row = append(row, cmp.Or(f.CaseRef, "-"))
+			}
+			row = append(row, f.DisplayName+"/")
+		} else {
+			f := e.file
+			row = []string{strconv.Itoa(f.ID), util.FormatTime(f.UpdatedAt), util.FormatBytes(f.Filesize), f.DataType}
+			if rw.showCase {
+				row = append(row, "-")
+			}
+			row = append(row, f.DisplayName)
 		}
-		f := e.file
-		rows = append(rows, [5]string{strconv.Itoa(f.ID), util.FormatTime(f.UpdatedAt),
-			util.FormatBytes(f.Filesize), f.DataType, f.DisplayName})
+		rows = append(rows, row)
 	}
 	for _, row := range rows {
 		for i := range rw.widths {
@@ -402,7 +453,7 @@ func (rw *folderRowWriter) write(entries []listEntry) error {
 		for i, width := range rw.widths {
 			fmt.Fprintf(&b, "%-*s  ", width, row[i])
 		}
-		b.WriteString(row[4])
+		b.WriteString(row[len(row)-1])
 		b.WriteByte('\n')
 	}
 	_, err := io.WriteString(rw.w, b.String())
@@ -443,10 +494,10 @@ func (v *SharedFoldersView) RenderHuman(w io.Writer) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tDISPLAY NAME\tOWNER\tUPDATED")
+	fmt.Fprintln(tw, "ID\tDISPLAY NAME\tCASE\tOWNER\tUPDATED")
 	for _, e := range v.Entries {
 		f := e.folder
-		fmt.Fprintf(tw, "%d\t%s/\t%s\t%s\n", f.ID, f.DisplayName, f.User.Username, util.FormatTime(f.UpdatedAt))
+		fmt.Fprintf(tw, "%d\t%s/\t%s\t%s\t%s\n", f.ID, f.DisplayName, cmp.Or(f.CaseRef, "-"), f.User.Username, util.FormatTime(f.UpdatedAt))
 	}
 	return tw.Flush()
 }
@@ -454,6 +505,28 @@ func (v *SharedFoldersView) RenderHuman(w io.Writer) error {
 func (v *SharedFoldersView) RenderVerbose(w io.Writer) error {
 	util.FprintTable(w, v.contents().Folders)
 	return nil
+}
+
+// CaseListView renders the case folders for 'case list'.
+type CaseListView struct{ Cases []openrelik.Folder }
+
+func (v *CaseListView) RenderHuman(w io.Writer) error {
+	if len(v.Cases) == 0 {
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "CASE\tID\tDISPLAY NAME\tOWNER\tUPDATED")
+	for _, f := range v.Cases {
+		fmt.Fprintf(tw, "%s\t%d\t%s/\t%s\t%s\n", f.CaseRef, f.ID, f.DisplayName, f.User.Username, util.FormatTime(f.UpdatedAt))
+	}
+	return tw.Flush()
+}
+
+func (v *CaseListView) UnwrapJSON() any {
+	if v.Cases == nil {
+		return []openrelik.Folder{}
+	}
+	return v.Cases
 }
 
 // ShareResultView renders what 'folder share' or 'folder unshare' did for

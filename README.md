@@ -31,6 +31,24 @@ openrelik folder list
 openrelik upload /path/to/local/evidence
 ```
 
+### Case Folders
+
+Give each case one official folder, found by its case reference instead of its name, so everyone's data for the case ends up in the same place:
+
+```bash
+# Create the case folder, or print it if case-123 already exists
+openrelik case create case-123 "ACME ransomware"
+
+# List the cases you can access
+openrelik case list
+
+# Work inside the case
+openrelik folder create evidence --case case-123 --use-existing
+openrelik upload disk.E01 evidence/ --case case-123
+openrelik run plaso --case case-123 evidence/disk.E01
+openrelik folder list --case case-123
+```
+
 ### Worker Execution
 
 Run a worker against a file on the server, by its ID or path, or provide a local file path to automatically upload and process it:
@@ -72,13 +90,18 @@ Enforce JSON output to integrate with command-line JSON processors like `jq`:
 openrelik folder list --format json | jq '.folders[].id'
 
 # Get the ID of "Case 7", creating the folder only if it doesn't exist yet
-openrelik folder create "Case 7" --exist-ok --format json | jq .id
+openrelik folder create "Case 7" --use-existing --format json | jq .id
+
+# Get the ID of the case folder of case-123, creating it if needed
+openrelik case create case-123 --format json | jq .id
 openrelik folder list 42 --format json | jq '.files[].id'
 ```
 
 `folder list --format json` returns an object, `{"folders": [...], "files": [...]}`. Older versions returned a plain array of folders, so update scripts that use `jq '.[].id'`.
 
-The human-readable `folder list` table now has the columns `ID UPDATED SIZE TYPE DISPLAY NAME`, with the name last so rows line up while they are printed. Older versions put `DISPLAY NAME` second. Scripts should use `--format json`, which is not affected.
+The human-readable `folder list` table now has the columns `ID UPDATED SIZE TYPE DISPLAY NAME`, with the name last so rows line up while they are printed, and listings of root folders add a `CASE` column before the name. Older versions put `DISPLAY NAME` second. Scripts should use `--format json`, which is not affected.
+
+`folder create --exist-ok` is now `--use-existing`. The old name still works.
 
 ## CLI Reference Guide
 
@@ -142,14 +165,27 @@ Inspect user account details.
 openrelik user me --format json
 ```
 
+### Case Management (`case`)
+
+A case folder is the one root folder of a case, found by its case reference (such as `case-123`) instead of its name. Each case has at most one case folder on the server. References are stored in lower case with spaces replaced by `-`, so `"CASE 123"` and `case-123` are the same case; they can contain letters, digits, `-`, `_`, `.` and `/`.
+
+*   `case create <REF> [NAME]`: Create the case folder of case `REF`, a root folder named `NAME` (or `REF`). If the case folder exists and you can access it, it is printed and the command succeeds (it keeps its name), so the command is safe to run again; if you can't access it, the command fails. With `--format json`, `created` says whether the folder is new.
+*   `case list`: List the cases you can access, sorted by case reference, with the ID, name and owner of each case folder.
+*   `case set <FOLDER> <REF>`: Make a root folder the case folder of case `REF`, or change its reference. Fails if another folder is the case folder of `REF`.
+*   `case clear <FOLDER>`: Remove the case reference of a folder, leaving an ordinary root folder and freeing the reference.
+
+Editors and owners of a folder, and admins, can set and clear its case reference.
+
+`--case REF` means the same in every command that has it (`folder list`, `folder tree`, `folder create`, `upload`, `run` and `workflow list`): work inside the case folder of case `REF`. Folder and file paths start at the case folder, and an ID must be of a folder or file inside the case, or the command fails with exit status 2, so data can't go outside the case by mistake. A case that doesn't exist or that you can't access exits with 3. If someone else owns the case folder, the command says so on stderr. Servers without case folders fail with "this server doesn't support case folders".
+
 ### Folder Management (`folder`)
 
 Organize files in hierarchical directories.
 
-*   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"` (a leading `/`, as `folder search` prints paths, is optional); an argument of only digits is an ID, so add a trailing `/` to use it as a name. Folder names may contain `/`, so `foo/bar/123` also finds a folder named `foo/bar/123`. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated. The root listing includes folders other users shared with you; `--shared` lists only those, with their owners. On servers that sort root folders, the root listing is printed as it arrives, and `--limit` up to 1000 only fetches the folders shown. Otherwise (older servers, `-r`, `--sort name`, larger limits, or JSON output) all root folders are fetched first, with a count on stderr while that runs. If printing stops partway, for example when the connection drops, the error says how many folders were printed.
+*   `folder list [FOLDER]`: List root folders. If you provide a folder, list the subfolders and files inside it. `FOLDER` is a folder ID or a path of names from the root folders, such as `"Case A/evidence/"` (a leading `/`, as `folder search` prints paths, is optional); an argument of only digits is an ID, so add a trailing `/` to use it as a name. Folder names may contain `/`, so `foo/bar/123` also finds a folder named `foo/bar/123`. If several folders match a path, they are listed with their IDs so you can pick one. Folder names end in `/` and have TYPE `folder`; folder and file IDs are separate, so use folder IDs with `folder list` and file IDs with `file` commands. Entries are listed like `ls -latr`: sorted by last update, most recently updated last. Use `--sort name` to sort by name, `-r` to reverse the order, and `--limit N` to show only the N most recently updated. The root listing includes folders other users shared with you; `--shared` lists only those, with their owners. On servers that sort root folders, the root listing is printed as it arrives, and `--limit` up to 1000 only fetches the folders shown. Otherwise (older servers, `-r`, `--sort name`, larger limits, or JSON output) all root folders are fetched first, with a count on stderr while that runs. If printing stops partway, for example when the connection drops, the error says how many folders were printed. Root folders that are case folders show their case reference in the `CASE` column. With `--case REF`, lists the case folder of case `REF`, or `FOLDER` inside it.
 *   `folder search <TERM>`: Search every folder you can access, including subfolders and folders shared with you, for names containing `TERM` (case-insensitive). Results show each folder's full path, which you can pass to `folder list`, `upload` and `folder create --parent`. All matches are shown; use `--limit N` to show only the N most recently updated. `--sort` and `-r` work as in `folder list`. Use `--latest` to show only the most recently updated match, and `--root` to search only root folders (and folders shared with you).
-*   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name like `tree`, so the structure is easy to scan (`folder list` and `folder search` sort by last update like `ls -latr`, so the latest work is shown last); use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes.
-*   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder. Use `--exist-ok` to print an existing folder with the same name in that location instead of creating a duplicate, which makes scripts safe to re-run. If several such folders exist it fails and lists them; add `--latest` to use the most recently updated one.
+*   `folder tree [FOLDER]`: Show a folder's contents recursively as a tree, like `tree`, with each entry's ID in brackets. Without `FOLDER`, shows all root folders. Sorted by name like `tree`, so the structure is easy to scan (`folder list` and `folder search` sort by last update like `ls -latr`, so the latest work is shown last); use `--sort time` and `-r` to change the order, `--level N` to limit the depth, `--folders-only` to leave out files, and `--size` to show file sizes. With `--case REF`, shows the case folder of case `REF`, or `FOLDER` inside it.
+*   `folder create <NAME>`: Create a new folder. Use `--parent <FOLDER>` (an ID or path) to create a subfolder, and `--case REF` to create it inside the case folder of case `REF` (`--parent` is then a folder inside the case). Use `--use-existing` to print an existing folder with the same name in that location instead of creating a duplicate, which makes scripts safe to re-run; at the root only your own folders count, inside a folder everyone's do. If several such folders exist it fails and lists them; add `--latest` to use the most recently updated one. `--exist-ok` is the old name of `--use-existing` and still works.
 *   `folder share <FOLDER>`: Give users (`--user NAME`) and groups (`--group NAME`) a role on a folder with `--role viewer|editor|owner` (required). Both flags can be repeated. Sharing a folder gives access to all its files and subfolders; files can't be shared on their own. A user or group that already has a role ends up with only the new one (the new role is added before the old one is removed). Each user and group is reported; if any fail, the rest are still shared and the command exits non-zero. Changes that would leave the folder without an owner are refused, and lowering your own role asks first (`--force` skips the question).
 *   `folder unshare <FOLDER>`: Remove every role the given `--user` and `--group` have on the folder. Roles on parent folders still give access; the command warns about them. Removing your own role asks first (`--force` skips the question).
 *   `folder access <FOLDER>`: Show your role on a folder, and the users and groups with a role on it or on its parent folders, with the folder each role is set on.
@@ -191,7 +227,7 @@ openrelik folder unshare "Case A/" --user alice
 
 Move files between your machine and OpenRelik.
 
-*   `upload <PATH>... [FOLDER]`: Upload files and directories. With more than one argument, the last one is the existing folder to upload into, given as an ID or path (like `cp`). Directories are uploaded recursively and recreated as subfolders; use `--depth N` to upload only N levels, and the directories left out are listed. With a single argument, or with `/` as `FOLDER`, a new root folder is created instead: a single directory becomes the root folder itself, and anything else goes into a folder named after the current time in UTC (e.g. `Upload 2026-10-27 14:05 UTC`). Use `--name` to choose the new folder's name. Files given directly are skipped if `FOLDER` already holds a file with the same name and SHA256, so an interrupted upload can simply be run again; if the server has no hash for a file with the same name and size (files over 5 GB aren't hashed), you are asked whether to upload it, and without a terminal the upload fails instead. Use `--force` to upload without checking.
+*   `upload <PATH>... [FOLDER]`: Upload files and directories. With more than one argument, the last one is the existing folder to upload into, given as an ID or path (like `cp`). Directories are uploaded recursively and recreated as subfolders; use `--depth N` to upload only N levels, and the directories left out are listed. With a single argument, or with `/` as `FOLDER`, a new root folder is created instead: a single directory becomes the root folder itself, and anything else goes into a folder named after the current time in UTC (e.g. `Upload 2026-10-27 14:05 UTC`). Use `--name` to choose the new folder's name. Files given directly are skipped if `FOLDER` already holds a file with the same name and SHA256, so an interrupted upload can simply be run again; if the server has no hash for a file with the same name and size (files over 5 GB aren't hashed), you are asked whether to upload it, and without a terminal the upload fails instead. Use `--force` to upload without checking. With `--case REF`, files go into the case folder of case `REF`, or into `FOLDER` inside it, and no root folder is created.
 *   `download <FILE> [DESTINATION]`: Download a file. `FILE` is a file ID or a path of folder names ending in the file name, as for `file cat`. `DESTINATION` may be a file path or an existing directory; by default the file is saved in the current directory under its original name.
 
 #### Examples
@@ -206,6 +242,10 @@ openrelik upload /path/to/evidence
 
 # Upload several files into a new root folder with a chosen name
 openrelik upload disk.E01 memory.raw / --name "Case 2026-001"
+
+# Upload into the case folder of case-123, or a folder inside it
+openrelik upload disk.E01 --case case-123
+openrelik upload logs/ evidence/ --case case-123
 
 # Download file 105 into a directory, or a file by its path
 openrelik download 105 /tmp/downloads/
@@ -245,6 +285,7 @@ Manage and execute forensic pipelines.
 
 *   `template list`: List available workflow templates.
 *   `workflow create`: Create a workflow. Requires `--file <ID>` and `--template <ID>`. Use `--run` to execute immediately.
+*   `workflow list [FOLDER]`: List the workflows run on files in a folder and the folders directly inside it, with the status of their tasks; `--recursive` includes all folders below it. With `--case REF`, lists the workflows of the case folder of case `REF`, or of `FOLDER` inside it (`workflow list --case REF --recursive` lists every workflow of the case).
 *   `workflow info <ID>`: Display workflow structure and configuration.
 *   `workflow status <ID>`: Show current execution status.
 *   `workflow wait <ID>`: Wait for a workflow to finish and show its status. Exits 1 if it failed; `--timeout 30m` stops waiting after a while.
@@ -268,6 +309,7 @@ Run workers on files. The CLI generates a subcommand for each worker from the lo
 *   Use `--then` to chain workers sequentially (passing output from one to the next).
 *   Use `--and` to run workers in parallel.
 *   Use `--dry-run` to output the generated JSON workflow specification without executing it.
+*   Use `--case REF` to run inside the case folder of case `REF`: local files are uploaded to the case folder, server paths start at the case folder, and file IDs must be of files in the case.
 *   Use `--download final|all|none` to choose which results are downloaded (default `final`), and `--download-result` or `--no-download-result` after a worker to override that for the worker's task. `--no-download` was removed; use `--download none`.
 
 #### Examples
@@ -281,6 +323,9 @@ openrelik run strings suspicious.exe
 
 # Run strings on a file on the server, by path
 openrelik run strings "Case A/evidence/disk.E01"
+
+# Run plaso on a local file, uploaded to the case folder of case-123
+openrelik run plaso --case case-123 disk.E01
 
 # Chain strings to grep
 openrelik run strings --then grep --regex "password" 100

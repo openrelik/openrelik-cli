@@ -245,7 +245,7 @@ func resolveFile(ctx context.Context, client *openrelik.Client, arg string) (int
 		}
 		return id, nil
 	}
-	m, err := resolveFilePath(ctx, client, arg)
+	m, err := resolveFilePath(ctx, client, nil, arg)
 	if err != nil {
 		return 0, err
 	}
@@ -267,12 +267,13 @@ type fileMatch struct {
 // the rest of the path: "Case A/a/b.txt" finds a file named "a/b.txt" in
 // Case A as well as b.txt in Case A/a/. As for folders, names match
 // ignoring case and extra '/', but paths whose names match exactly win.
-func resolveFilePath(ctx context.Context, client *openrelik.Client, arg string) (fileMatch, error) {
+// If base isn't nil, the folders are resolved from its subfolders.
+func resolveFilePath(ctx context.Context, client *openrelik.Client, base *openrelik.Folder, arg string) (fileMatch, error) {
 	i := strings.LastIndex(arg, "/")
 	if i < 0 || strings.Trim(arg[:i], "/") == "" {
 		return fileMatch{}, usageErrorf("invalid file %q: give a file ID or a path such as 'FOLDER/NAME'", arg)
 	}
-	dir, name := arg[:i], arg[i+1:]
+	name := arg[i+1:]
 	if name == "" {
 		return fileMatch{}, usageErrorf("invalid file %q: the path ends in '/', so it names a folder", arg)
 	}
@@ -280,7 +281,7 @@ func resolveFilePath(ctx context.Context, client *openrelik.Client, arg string) 
 	// The folders leave at least the last segment for the file name.
 	segments := pathSegments(arg)
 	dirSegments := segments[:len(segments)-1]
-	folders, err := walkFolderPath(ctx, client, dirSegments)
+	folders, err := walkFolderPath(ctx, client, base, dirSegments)
 	if err != nil {
 		return fileMatch{}, err
 	}
@@ -305,9 +306,13 @@ func resolveFilePath(ctx context.Context, client *openrelik.Client, arg string) 
 
 	if len(matches) == 0 {
 		if !slices.ContainsFunc(folders, func(m folderMatch) bool { return m.used == len(dirSegments) }) {
-			return fileMatch{}, folderNotFound(dirSegments, folders)
+			return fileMatch{}, folderNotFound(base, dirSegments, folders)
 		}
-		return fileMatch{}, notFoundError(fmt.Sprintf("no file named %q in %s/", name, strings.TrimRight(dir, "/")))
+		if base != nil {
+			path := formatFolderPath(append([]string{base.DisplayName}, dirSegments...))
+			return fileMatch{}, notFoundError(fmt.Sprintf("no file named %q in %s of case %s", name, path, base.CaseRef))
+		}
+		return fileMatch{}, notFoundError(fmt.Sprintf("no file named %q in %s", name, formatFolderPath(dirSegments)))
 	}
 	matches = preferExact(matches, func(m fileMatch) bool { return m.inexact })
 	if len(matches) > 1 {

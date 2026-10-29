@@ -61,6 +61,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newAuthCmd())
 	cmd.AddCommand(newUserCmd())
 	cmd.AddCommand(newFolderCmd())
+	cmd.AddCommand(newCaseCmd())
 	cmd.AddCommand(newFileCmd())
 	cmd.AddCommand(newWorkerCmd())
 	cmd.AddCommand(newTemplateCmd())

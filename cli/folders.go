@@ -44,6 +44,7 @@ const folderPageSize = 100
 func newListFoldersCmd() *cobra.Command {
 	var opts listOptions
 	var shared bool
+	var caseRef string
 
 	cmd := &cobra.Command{
 		Use:     "list [FOLDER]",
@@ -63,9 +64,14 @@ digits is an ID; add a trailing '/' to treat it as a name instead
 folder named "foo/bar/123". If more than one folder matches a path, the
 matches are listed so you can pick one by ID.
 
+With --case REF, lists the case folder of case REF (see 'case
+create'), or with FOLDER, a folder inside it: a path from the case
+folder, or the ID of a folder in the case.
+
 Folder names end in '/' and have TYPE folder. Folder and file IDs are
 separate, so pass folder IDs to 'folder list' and file IDs to commands
-such as 'file info'.
+such as 'file info'. Root folders that are case folders show their case
+reference in the CASE column.
 
 Like 'ls -latr', entries are sorted by last update with the most
 recently updated entry last, so the latest work ends up next to the
@@ -84,6 +90,10 @@ recently updated entries, in the selected sort order.`,
 
   # List a folder by its path from the root folders
   openrelik folder list "Case A/evidence/"
+
+  # List the case folder of case-123, and a folder inside it
+  openrelik folder list --case case-123
+  openrelik folder list evidence/ --case case-123
 
   # Most recently updated first
   openrelik folder list 42 -r
@@ -104,6 +114,10 @@ recently updated entries, in the selected sort order.`,
 			if shared && len(args) > 0 {
 				return usageErrorf("--shared lists root folders, so it can't be used with FOLDER")
 			}
+			withCase := cmd.Flags().Changed("case")
+			if shared && withCase {
+				return usageErrorf("--shared lists root folders, so it can't be used with --case")
+			}
 
 			client, err := newClient()
 			if err != nil {
@@ -111,8 +125,15 @@ recently updated entries, in the selected sort order.`,
 			}
 
 			var fID int
+			var caseFolder *openrelik.Folder
+			if withCase {
+				if caseFolder, err = lookupCase(cmd, client, caseRef); err != nil {
+					return err
+				}
+				fID = caseFolder.ID
+			}
 			if len(args) > 0 {
-				fID, err = resolveFolder(cmd.Context(), client, args[0])
+				fID, err = resolveFolderIn(cmd.Context(), client, caseFolder, args[0])
 				if err != nil {
 					return err
 				}
@@ -160,7 +181,7 @@ recently updated entries, in the selected sort order.`,
 			}
 			entries = limitAndSortEntries(entries, opts.limit, opts.sortBy, opts.reverse)
 
-			var view any = &FolderContentsView{Entries: entries}
+			var view any = &FolderContentsView{Entries: entries, ShowCase: fID == 0}
 			if shared {
 				view = &SharedFoldersView{FolderContentsView{Entries: entries}}
 			}
@@ -174,6 +195,7 @@ recently updated entries, in the selected sort order.`,
 
 	opts.addFlags(cmd, 0)
 	cmd.Flags().BoolVar(&shared, "shared", false, "List only the root folders other users shared with you")
+	cmd.Flags().StringVar(&caseRef, "case", "", "List the case folder of case `REF`, or FOLDER inside it")
 	return cmd
 }
 
@@ -215,7 +237,7 @@ func resolveFolder(ctx context.Context, client *openrelik.Client, arg string) (i
 		}
 		return id, nil
 	}
-	return resolveFolderPath(ctx, client, arg)
+	return resolveFolderPath(ctx, client, nil, arg)
 }
 
 // folderMatch is a folder found while resolving a path, with the names of
@@ -242,19 +264,19 @@ type notFoundError string
 func (e notFoundError) Error() string { return string(e) }
 
 // resolveFolderPath walks a path like "Case A/evidence/" from the root
-// folders. Every branch whose names match is followed, so a path is only
+// folders, or from the subfolders of base if it isn't nil. Every branch whose names match is followed, so a path is only
 // ambiguous if more than one complete path matches. Folder names may contain
 // '/', so a name can match several segments: "foo/bar/123" finds a root
 // folder named "foo/bar/123" as well as folder 123 inside foo/bar.
 // Names match ignoring case and extra '/', but paths whose names match
 // exactly win.
-func resolveFolderPath(ctx context.Context, client *openrelik.Client, path string) (int, error) {
+func resolveFolderPath(ctx context.Context, client *openrelik.Client, base *openrelik.Folder, path string) (int, error) {
 	segments := pathSegments(path)
 	if len(segments) == 0 {
 		return 0, usageErrorf("invalid folder path %q", path)
 	}
 
-	reached, err := walkFolderPath(ctx, client, segments)
+	reached, err := walkFolderPath(ctx, client, base, segments)
 	if err != nil {
 		return 0, err
 	}
@@ -265,7 +287,7 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 		}
 	}
 	if len(matches) == 0 {
-		return 0, folderNotFound(segments, reached)
+		return 0, folderNotFound(base, segments, reached)
 	}
 	matches = preferExact(matches, func(m folderMatch) bool { return m.inexact })
 	if len(matches) > 1 {
@@ -275,14 +297,24 @@ func resolveFolderPath(ctx context.Context, client *openrelik.Client, path strin
 }
 
 // walkFolderPath follows every branch of folders whose names match
-// segments, starting at the root folders, and returns every folder reached,
-// including those that match only the start of segments.
-func walkFolderPath(ctx context.Context, client *openrelik.Client, segments []string) ([]folderMatch, error) {
-	roots, err := util.ListAllRootFolders(ctx, client, nil)
+// segments, starting at the root folders, or at the subfolders of base if it
+// isn't nil, and returns every folder reached, including those that match
+// only the start of segments. The paths of folders below base start with
+// its name.
+func walkFolderPath(ctx context.Context, client *openrelik.Client, base *openrelik.Folder, segments []string) ([]folderMatch, error) {
+	var start []openrelik.Folder
+	var err error
+	var parent folderMatch
+	if base != nil {
+		start, _, err = client.Folders().ListSubFolders(ctx, base.ID)
+		parent = folderMatch{folder: *base, path: []string{base.DisplayName}}
+	} else {
+		start, err = util.ListAllRootFolders(ctx, client, nil)
+	}
 	if err != nil {
 		return nil, err
 	}
-	pending := matchFolderNames(roots, segments, folderMatch{})
+	pending := matchFolderNames(start, segments, parent)
 	var reached []folderMatch
 	for len(pending) > 0 {
 		var next []folderMatch
@@ -302,13 +334,20 @@ func walkFolderPath(ctx context.Context, client *openrelik.Client, segments []st
 	return reached, nil
 }
 
-// folderNotFound reports how far along segments the folders reached got.
-func folderNotFound(segments []string, reached []folderMatch) error {
+// folderNotFound reports how far along segments, from base if it isn't nil,
+// the folders reached got.
+func folderNotFound(base *openrelik.Folder, segments []string, reached []folderMatch) error {
 	matched := 0
 	for _, m := range reached {
 		matched = max(matched, m.used)
 	}
-	if matched == 0 {
+	switch {
+	case base != nil && matched == 0:
+		return notFoundError(fmt.Sprintf("no folder named %q in case %s", segments[0], base.CaseRef))
+	case base != nil:
+		path := append([]string{base.DisplayName}, segments[:matched]...)
+		return notFoundError(fmt.Sprintf("no folder named %q in %s", segments[matched], formatFolderPath(path)))
+	case matched == 0:
 		return notFoundError(fmt.Sprintf("no root folder named %q", segments[0]))
 	}
 	return notFoundError(fmt.Sprintf("no folder named %q in %s", segments[matched], formatFolderPath(segments[:matched])))
@@ -401,7 +440,7 @@ func listRootFolders(cmd *cobra.Command, client *openrelik.Client) ([]openrelik.
 func streamRootFolders(cmd *cobra.Command, client *openrelik.Client) (bool, error) {
 	// IDs of later pages may be wider than those of the first; a minimum
 	// width keeps the columns lined up for IDs below 10 million.
-	rw := &folderRowWriter{w: cmd.OutOrStdout(), minIDWidth: 7}
+	rw := &folderRowWriter{w: cmd.OutOrStdout(), minIDWidth: 7, showCase: true}
 	printed := 0
 	total, ok, err := util.StreamRootFolders(cmd.Context(), client, "updated_at", "asc", 0, func(page []openrelik.Folder) error {
 		entries := make([]listEntry, len(page))
@@ -543,8 +582,8 @@ func sortEntries(entries []listEntry, sortBy string, reverse bool) {
 }
 
 func newCreateFolderCmd() *cobra.Command {
-	var parent string
-	var existOK bool
+	var parent, caseRef string
+	var useExisting bool
 	var latest bool
 
 	cmd := &cobra.Command{
@@ -556,10 +595,15 @@ Without --parent, creates a root-level folder. With --parent, creates a
 subfolder inside the specified parent folder. The parent is a folder ID
 or a path of folder names, as accepted by 'folder list'.
 
-With --exist-ok, if a folder with exactly this name already exists in that
-location, it is printed instead of creating a duplicate; at the root, only
-folders you own count. If several such folders exist, the command fails
-and lists them; add --latest to use the most recently updated one instead.
+With --case REF, the folder is created inside the case folder of case REF
+(see 'case create'), and --parent is a folder inside the case
+folder: a path from the case folder, or the ID of a folder in the case.
+
+With --use-existing, if a folder with exactly this name already exists in
+that location, it is printed instead of creating a duplicate; at the root,
+only folders you own count, but in a folder, such as a case folder, those
+of every owner do. If several such folders exist, the command fails and
+lists them; add --latest to use the most recently updated one instead.
 This makes scripts safe to re-run, but it is not atomic: two runs at the
 same moment can still both create the folder.`,
 		Example: `  # Create a root folder
@@ -571,15 +615,21 @@ same moment can still both create the folder.`,
   # Create a subfolder by parent path
   openrelik folder create "logs" --parent "Case A/evidence/"
 
+  # Create "evidence" in the case folder of case-123, unless it exists
+  openrelik folder create evidence --case case-123 --use-existing
+
+  # Create "logs" in the folder "evidence" of case-123
+  openrelik folder create logs --case case-123 --parent evidence
+
   # Get the ID of "Case 7", creating it only if it doesn't exist
-  openrelik folder create "Case 7" --exist-ok --format json | jq .id
+  openrelik folder create "Case 7" --use-existing --format json | jq .id
 
   # Same, using the most recently updated "Case 7" if there are several
-  openrelik folder create "Case 7" --exist-ok --latest`,
+  openrelik folder create "Case 7" --use-existing --latest`,
 		Args: util.UseArgsWithQuoteHint("parent"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if latest && !existOK {
-				return fmt.Errorf("--latest can only be used with --exist-ok")
+			if latest && !useExisting {
+				return usageErrorf("--latest can only be used with --use-existing")
 			}
 
 			client, err := newClient()
@@ -589,8 +639,15 @@ same moment can still both create the folder.`,
 
 			name := args[0]
 			var parentID int
+			var caseFolder *openrelik.Folder
+			if cmd.Flags().Changed("case") {
+				if caseFolder, err = lookupCase(cmd, client, caseRef); err != nil {
+					return err
+				}
+				parentID = caseFolder.ID
+			}
 			if cmd.Flags().Changed("parent") {
-				parentID, err = resolveFolder(cmd.Context(), client, parent)
+				parentID, err = resolveFolderIn(cmd.Context(), client, caseFolder, parent)
 				if err != nil {
 					return err
 				}
@@ -599,7 +656,7 @@ same moment can still both create the folder.`,
 			var folder *openrelik.Folder
 			created := true
 			switch {
-			case existOK:
+			case useExisting:
 				folder, created, err = util.FindOrCreateFolder(cmd.Context(), client, parentID, name)
 				var multiple *util.MultipleFoldersError
 				if errors.As(err, &multiple) {
@@ -627,13 +684,17 @@ same moment can still both create the folder.`,
 	}
 
 	cmd.Flags().StringVarP(&parent, "parent", "p", "", "Parent folder ID or path")
-	cmd.Flags().BoolVar(&existOK, "exist-ok", false, "If a folder with this name already exists here, print it instead of creating a duplicate")
-	cmd.Flags().BoolVar(&latest, "latest", false, "With --exist-ok, use the most recently updated folder if several exist")
+	cmd.Flags().StringVar(&caseRef, "case", "", "Create the folder inside the case folder of case `REF`")
+	cmd.Flags().BoolVar(&useExisting, "use-existing", false, "If a folder with this name already exists here, print it instead of creating a duplicate")
+	// The flag's old name keeps working.
+	cmd.Flags().BoolVar(&useExisting, "exist-ok", false, "")
+	cmd.Flags().MarkHidden("exist-ok")
+	cmd.Flags().BoolVar(&latest, "latest", false, "With --use-existing, use the most recently updated folder if several exist")
 	return cmd
 }
 
 // existingFoldersError lists the folders that made 'folder create
-// --exist-ok' ambiguous so the user can pick one by ID.
+// --use-existing' ambiguous so the user can pick one by ID.
 func existingFoldersError(e *util.MultipleFoldersError) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s:\n\n", e.Error())

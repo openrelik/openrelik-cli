@@ -1230,7 +1230,7 @@ func TestFolderSearchErrors(t *testing.T) {
 	}
 }
 
-func TestFolderCreateExistOK(t *testing.T) {
+func TestFolderCreateUseExisting(t *testing.T) {
 	tests := []struct {
 		name           string
 		args           []string
@@ -1241,51 +1241,56 @@ func TestFolderCreateExistOK(t *testing.T) {
 	}{
 		{
 			name:       "existing root folder",
+			args:       []string{"Case A", "--use-existing"},
+			wantOutput: `Folder "Case A" already exists (ID 42)`,
+		},
+		{
+			name:       "existing root folder with the old flag name --exist-ok",
 			args:       []string{"Case A", "--exist-ok"},
 			wantOutput: `Folder "Case A" already exists (ID 42)`,
 		},
 		{
 			name:       "missing root folder is created",
-			args:       []string{"Case B", "--exist-ok"},
+			args:       []string{"Case B", "--use-existing"},
 			wantOutput: `Folder "Case B" created (ID 501)`,
 			wantRoots:  []string{"Case B"},
 		},
 		{
 			name:       "root folder shared by someone else is not reused",
-			args:       []string{"Shared", "--exist-ok"},
+			args:       []string{"Shared", "--use-existing"},
 			wantOutput: `Folder "Shared" created (ID 501)`,
 			wantRoots:  []string{"Shared"},
 		},
 		{
 			name:       "existing subfolder by parent path",
-			args:       []string{"evidence", "--parent", "Case A/", "--exist-ok"},
+			args:       []string{"evidence", "--parent", "Case A/", "--use-existing"},
 			wantOutput: `Folder "evidence" already exists (ID 43)`,
 		},
 		{
 			name:           "missing subfolder is created",
-			args:           []string{"logs", "--parent", "Case A/", "--exist-ok"},
+			args:           []string{"logs", "--parent", "Case A/", "--use-existing"},
 			wantOutput:     `Folder "logs" created (ID 501)`,
 			wantSubfolders: []string{"42/logs"},
 		},
 		{
-			name:       "without --exist-ok a duplicate is created",
+			name:       "without --use-existing a duplicate is created",
 			args:       []string{"Case A"},
 			wantOutput: `Folder "Case A" created (ID 501)`,
 			wantRoots:  []string{"Case A"},
 		},
 		{
 			name:       "several existing folders with --latest uses the most recently updated",
-			args:       []string{"Dup", "--exist-ok", "--latest"},
+			args:       []string{"Dup", "--use-existing", "--latest"},
 			wantOutput: `Folder "Dup" already exists (ID 44)`,
 		},
 		{
-			name:    "--latest needs --exist-ok",
+			name:    "--latest needs --use-existing",
 			args:    []string{"Dup", "--latest"},
-			wantErr: []string{"--latest can only be used with --exist-ok"},
+			wantErr: []string{"--latest can only be used with --use-existing"},
 		},
 		{
 			name:    "several existing folders",
-			args:    []string{"Dup", "--exist-ok"},
+			args:    []string{"Dup", "--use-existing"},
 			wantErr: []string{`multiple folders named "Dup" already exist`, "ID", "OWNER", "\n44 ", "\n45 ", "Use one of the IDs above, or add --latest"},
 		},
 	}
@@ -1344,7 +1349,7 @@ func TestFolderCreateLatestCheckedBeforeCredentials(t *testing.T) {
 	root.SetIn(new(bytes.Buffer))
 	root.SetArgs([]string{"folder", "create", "Dup", "--latest"})
 	err := root.Execute()
-	if err == nil || !strings.Contains(err.Error(), "--latest can only be used with --exist-ok") {
+	if err == nil || !strings.Contains(err.Error(), "--latest can only be used with --use-existing") {
 		t.Fatalf("expected the --latest error, got %v", err)
 	}
 }
@@ -1362,7 +1367,7 @@ func TestFolderCreateJSONReportsCreated(t *testing.T) {
 		stdout := new(bytes.Buffer)
 		root.SetOut(stdout)
 		root.SetErr(new(bytes.Buffer))
-		root.SetArgs([]string{"folder", "create", tt.name, "--exist-ok", "--format", "json"})
+		root.SetArgs([]string{"folder", "create", tt.name, "--use-existing", "--format", "json"})
 		if err := root.Execute(); err != nil {
 			t.Fatalf("%s: Execute() failed: %v", tt.name, err)
 		}
@@ -1385,9 +1390,9 @@ func TestFolderCreateLatestNote(t *testing.T) {
 		args     []string
 		wantNote bool
 	}{
-		{[]string{"Dup", "--exist-ok", "--latest"}, true},
-		{[]string{"Dup", "--exist-ok", "--latest", "--format", "json"}, false},
-		{[]string{"Dup", "--exist-ok", "--latest", "--quiet"}, false},
+		{[]string{"Dup", "--use-existing", "--latest"}, true},
+		{[]string{"Dup", "--use-existing", "--latest", "--format", "json"}, false},
+		{[]string{"Dup", "--use-existing", "--latest", "--quiet"}, false},
 	} {
 		server := newUploadServer(t)
 		t.Setenv("OPENRELIK_API_KEY", "test-key")

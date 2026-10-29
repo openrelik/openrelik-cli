@@ -174,7 +174,7 @@ func loadShareFolder(cmd *cobra.Command, client *openrelik.Client, arg, hint str
 	ctx := cmd.Context()
 	id, err := resolveFolder(ctx, client, arg)
 	if errors.As(err, new(notFoundError)) && !strings.HasSuffix(arg, "/") {
-		if m, fileErr := resolveFilePath(ctx, client, arg); fileErr == nil {
+		if m, fileErr := resolveFilePath(ctx, client, nil, arg); fileErr == nil {
 			dir := strings.TrimPrefix(m.folder.location(), "/")
 			return nil, fileShareError(arg, cmd.Name(), dir, hint)
 		}

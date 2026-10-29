@@ -294,6 +294,34 @@ func TestRunFailedWorkflow(t *testing.T) {
 	if !strings.HasPrefix(stdout.String(), wantOut) {
 		t.Errorf("stdout = %q, want it to start with %q", stdout.String(), wantOut)
 	}
+
+	// JSON output has the workflow, how it ended and the saved files.
+	jsonDir := t.TempDir()
+	root = NewRootCmd()
+	stdout.Reset()
+	root.SetOut(stdout)
+	root.SetErr(new(bytes.Buffer))
+	root.SetArgs([]string{"run", "-o", jsonDir, "--format", "json", "strings", "123"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected the failed workflow to fail with --format json too")
+	}
+	var got struct {
+		ID         int    `json:"id"`
+		Status     string `json:"status"`
+		Downloaded []struct {
+			FileID   int    `json:"file_id"`
+			Path     string `json:"path"`
+			SHA256   string `json:"sha256"`
+			Verified bool   `json:"verified"`
+		} `json:"downloaded"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("invalid JSON (%v): %s", err, stdout)
+	}
+	if got.ID != 100 || got.Status != "FAILURE" || len(got.Downloaded) != 1 ||
+		got.Downloaded[0].FileID != 10 || got.Downloaded[0].Path != filepath.Join(jsonDir, "partial.txt") || len(got.Downloaded[0].SHA256) != 64 {
+		t.Errorf("unexpected JSON: %s", stdout)
+	}
 }
 
 func TestRunDryRunAndSegmentFlags(t *testing.T) {

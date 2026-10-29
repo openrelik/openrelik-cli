@@ -310,6 +310,7 @@ Run workers on files. The CLI generates a subcommand for each worker from the lo
 *   Use `--and` to run workers in parallel.
 *   Use `--dry-run` to output the generated JSON workflow specification without executing it.
 *   Use `--case REF` to run inside the case folder of case `REF`: local files are uploaded to the case folder, server paths start at the case folder, and file IDs must be of files in the case.
+*   With `--format json`, `run` prints the workflow with `status`, how it ended, and `downloaded`: each downloaded file with its `file_id`, `path`, `size`, `sha256` and `verified`, which says whether the SHA256 matched the server's. It used to print the workflow alone.
 *   Use `--download final|all|none` to choose which results are downloaded (default `final`), and `--download-result` or `--no-download-result` after a worker to override that for the worker's task. `--no-download` was removed; use `--download none`.
 
 #### Examples

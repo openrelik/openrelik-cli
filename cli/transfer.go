@@ -49,11 +49,11 @@ create'), or into FOLDER inside it: a path from the case folder, or
 the ID of a folder in the case. No root folder is created.
 
 Files given directly are skipped if FOLDER already holds a file with the
-same name and SHA256, so an interrupted upload can be run again. If the
-server has no hash for a file with the same name and size (very large
-files aren't hashed, and hashing runs in the background), you are asked
-whether to upload it; without a terminal to ask on, the upload fails
-instead. Use --force to upload without checking.
+same name and SHA256, so an interrupted upload can be run again. Files
+the server has no hash for (very large files aren't hashed, and hashing
+runs in the background) are uploaded again, so the folder may end up with
+two copies; a note names the file already there. Use --force to upload
+without checking.
 
 Each file is hashed as it is sent, and the SHA256 is compared with the one
 the server computes. The upload fails if they differ. Files the server
@@ -162,16 +162,15 @@ hasn't hashed (yet) are reported as not verified.`,
 					return err
 				}
 				if !force {
-					var unverified []skippedFile
-					view.Skipped, unverified, err = util.FindExisting(cmd.Context(), client, view.FolderID, sources, isDir, sizes)
+					var unhashed []skippedFile
+					view.Skipped, unhashed, err = util.FindExisting(cmd.Context(), client, view.FolderID, sources, isDir, sizes)
 					if err != nil {
 						return err
 					}
-					declined, err := askUnverified(cmd, unverified)
-					if err != nil {
-						return err
+					for _, s := range unhashed {
+						fmt.Fprintf(cmd.ErrOrStderr(), "Note: folder %d already holds file %d with the same name and size as %q, but the server has no hash to compare; uploading anyway.\n",
+							s.FolderID, s.FileID, filepath.Base(s.Path))
 					}
-					view.Skipped = append(view.Skipped, declined...)
 				}
 			} else {
 				single = len(sources) == 1 && isDir[0]
@@ -257,40 +256,6 @@ func localDirName(path string) string {
 // skippedFile is a file 'upload' left out because the destination folder
 // already holds it.
 type skippedFile = util.ExistingFile
-
-// askUnverified asks whether to upload each file that may already be in
-// the destination folder, and returns the ones to skip. Without a terminal
-// to ask on, it fails instead, so a script never skips a file silently.
-func askUnverified(cmd *cobra.Command, unverified []skippedFile) ([]skippedFile, error) {
-	if len(unverified) == 0 {
-		return nil, nil
-	}
-	describe := func(s skippedFile) string {
-		return fmt.Sprintf("%q may already be in folder %d as file %d: it has the same name and size, but the server has no hash to compare.",
-			filepath.Base(s.Path), s.FolderID, s.FileID)
-	}
-
-	if !stdinIsTerminal(cmd.InOrStdin()) {
-		var b strings.Builder
-		for _, s := range unverified {
-			b.WriteString(describe(s) + "\n")
-		}
-		b.WriteString("\nUse --force to upload anyway, or leave these files out.")
-		return nil, errors.New(b.String())
-	}
-
-	var skip []skippedFile
-	for _, s := range unverified {
-		upload, err := util.Confirm(cmd.ErrOrStderr(), cmd.InOrStdin(), describe(s)+" Upload anyway?")
-		if err != nil {
-			return nil, err
-		}
-		if !upload {
-			skip = append(skip, s)
-		}
-	}
-	return skip, nil
-}
 
 // uploadedFile is a file uploaded by 'upload' and the folder it went to.
 type uploadedFile struct {

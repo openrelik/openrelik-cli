@@ -300,14 +300,14 @@ type ExistingFile struct {
 }
 
 // FindExisting returns the files among sources that folderID already
-// holds. Only files with the same name and size are compared, so other
-// files cost nothing beyond one listing of the folder. Files with the same
-// SHA256 are returned as duplicates. Files the server has no hash for are
-// returned as unverified instead: hashing is skipped for very large files
-// and runs in the background, so the same name and size is all there is to
-// go on, and memory images of the same machine often share both.
-// Directories (isDir) are left out.
-func FindExisting(ctx context.Context, client *openrelik.Client, folderID int, sources []string, isDir []bool, sizes []int64) (duplicates, unverified []ExistingFile, err error) {
+// holds: files with the same name and SHA256. Only files with the same name
+// and size are compared, so other files cost nothing beyond one listing of
+// the folder. Files the server has no hash for never match: hashing is
+// skipped for very large files and runs in the background, so they are
+// uploaded again rather than skipped on name and size alone. They are
+// returned as unhashed, so the caller can say the folder may now hold two
+// copies. Directories (isDir) are left out.
+func FindExisting(ctx context.Context, client *openrelik.Client, folderID int, sources []string, isDir []bool, sizes []int64) (duplicates, unhashed []ExistingFile, err error) {
 	if !slices.Contains(isDir, false) {
 		return nil, nil, nil // only directories, which go into new subfolders
 	}
@@ -321,7 +321,7 @@ func FindExisting(ctx context.Context, client *openrelik.Client, folderID int, s
 			continue
 		}
 		var localHash string
-		var unhashed *ExistingFile
+		var noHash *ExistingFile
 		for _, f := range existing {
 			if f.DisplayName != filepath.Base(p) || f.Filesize != sizes[i] {
 				continue
@@ -331,8 +331,8 @@ func FindExisting(ctx context.Context, client *openrelik.Client, folderID int, s
 				return nil, nil, err
 			}
 			if info.HashSHA256 == "" {
-				if unhashed == nil {
-					unhashed = &ExistingFile{Path: p, FileID: f.ID, FolderID: folderID,
+				if noHash == nil {
+					noHash = &ExistingFile{Path: p, FileID: f.ID, FolderID: folderID,
 						Reason: "same name and size; the server has no hash to compare"}
 				}
 				continue
@@ -344,15 +344,15 @@ func FindExisting(ctx context.Context, client *openrelik.Client, folderID int, s
 			}
 			if strings.EqualFold(localHash, info.HashSHA256) {
 				duplicates = append(duplicates, ExistingFile{Path: p, FileID: f.ID, FolderID: folderID, Reason: "same name and SHA256"})
-				unhashed = nil
+				noHash = nil
 				break
 			}
 		}
-		if unhashed != nil {
-			unverified = append(unverified, *unhashed)
+		if noHash != nil {
+			unhashed = append(unhashed, *noHash)
 		}
 	}
-	return duplicates, unverified, nil
+	return duplicates, unhashed, nil
 }
 
 // FileSHA256 returns the hex SHA256 of the file at path.

@@ -143,13 +143,6 @@ func writeTree(t *testing.T, dirName string, files ...string) string {
 
 func runUpload(t *testing.T, server *uploadServer, args ...string) (string, error) {
 	t.Helper()
-	return runUploadWithInput(t, server, "", args...)
-}
-
-// runUploadWithInput runs 'upload' with input on stdin, for answering
-// prompts.
-func runUploadWithInput(t *testing.T, server *uploadServer, input string, args ...string) (string, error) {
-	t.Helper()
 	t.Setenv("OPENRELIK_API_KEY", "test-key")
 	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
 
@@ -157,7 +150,7 @@ func runUploadWithInput(t *testing.T, server *uploadServer, input string, args .
 	stdout := new(bytes.Buffer)
 	root.SetOut(stdout)
 	root.SetErr(new(bytes.Buffer))
-	root.SetIn(strings.NewReader(input))
+	root.SetIn(strings.NewReader(""))
 	root.SetArgs(append([]string{"upload"}, args...))
 	err := root.Execute()
 	return stdout.String(), err
@@ -442,69 +435,38 @@ func TestUploadSkipsDuplicates(t *testing.T) {
 	}
 }
 
-func TestUploadUnverifiedDuplicates(t *testing.T) {
+func TestUploadUploadsUnhashedSameNameAndSize(t *testing.T) {
 	loose := writeTree(t, "loose", "a.txt", "b.txt")
 	a, b := filepath.Join(loose, "a.txt"), filepath.Join(loose, "b.txt")
 
-	tests := []struct {
-		name        string
-		terminal    bool
-		input       string
-		wantErr     string
-		wantUploads map[string]string
-		wantOutput  string
-	}{
-		{
-			name:        "fails without a terminal",
-			wantErr:     "\"a.txt\" may already be in folder 42 as file 77: it has the same name and size, but the server has no hash to compare.\n\nUse --force",
-			wantUploads: map[string]string{},
-		},
-		{
-			name:        "uploads when confirmed",
-			terminal:    true,
-			input:       "y\n",
-			wantUploads: map[string]string{"a.txt": "42", "b.txt": "42"},
-		},
-		{
-			name:        "skips when declined",
-			terminal:    true,
-			input:       "n\n",
-			wantUploads: map[string]string{"b.txt": "42"},
-			wantOutput:  `Skipped "a.txt": already in folder 42 as file 77 (same name and size; the server has no hash to compare)`,
-		},
-		{
-			name:        "skips at end of input",
-			terminal:    true,
-			wantUploads: map[string]string{"b.txt": "42"},
-			wantOutput:  `Skipped "a.txt"`,
-		},
+	server := newUploadServer(t)
+	defer server.Close()
+	server.files["42"] = fmt.Sprintf(`[{"id": 77, "display_name": "a.txt", "filesize": %d}]`, len("content of a.txt"))
+	server.info["77"] = `{"id": 77, "display_name": "a.txt"}`
+
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	root := NewRootCmd()
+	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetIn(strings.NewReader(""))
+	root.SetArgs([]string{"upload", a, b, "42"})
+
+	// No terminal, and nothing to ask: a file without a hash is uploaded.
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() failed: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			orig := stdinIsTerminal
-			stdinIsTerminal = func(io.Reader) bool { return tt.terminal }
-			t.Cleanup(func() { stdinIsTerminal = orig })
-
-			server := newUploadServer(t)
-			defer server.Close()
-			server.files["42"] = fmt.Sprintf(`[{"id": 77, "display_name": "a.txt", "filesize": %d}]`, len("content of a.txt"))
-			server.info["77"] = `{"id": 77, "display_name": "a.txt"}`
-
-			out, err := runUploadWithInput(t, server, tt.input, a, b, "42")
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
-				}
-			} else if err != nil {
-				t.Fatalf("Execute() failed: %v", err)
-			}
-			if fmt.Sprint(server.uploads) != fmt.Sprint(tt.wantUploads) {
-				t.Errorf("uploaded %v, want %v", server.uploads, tt.wantUploads)
-			}
-			if !strings.Contains(out, tt.wantOutput) {
-				t.Errorf("expected output to contain %q\n%s", tt.wantOutput, out)
-			}
-		})
+	out := stdout.String()
+	wantNote := `Note: folder 42 already holds file 77 with the same name and size as "a.txt", but the server has no hash to compare; uploading anyway.`
+	if !strings.Contains(stderr.String(), wantNote) {
+		t.Errorf("expected stderr to contain %q\n%s", wantNote, stderr.String())
+	}
+	if want := map[string]string{"a.txt": "42", "b.txt": "42"}; fmt.Sprint(server.uploads) != fmt.Sprint(want) {
+		t.Errorf("uploaded %v, want %v", server.uploads, want)
+	}
+	if strings.Contains(out, "Skipped") {
+		t.Errorf("expected nothing skipped\n%s", out)
 	}
 }
 
@@ -520,7 +482,7 @@ func TestUploadPrefersHashMatchOverUnhashed(t *testing.T) {
 	server.info["76"] = `{"id": 76, "display_name": "a.txt"}`
 	server.info["77"] = fmt.Sprintf(`{"id": 77, "display_name": "a.txt", "hash_sha256": %q}`, hex.EncodeToString(sum[:]))
 
-	// No terminal, so asking about file 76 would fail.
+	// File 76 has no hash, so only file 77 can match.
 	out, err := runUpload(t, server, filepath.Join(loose, "a.txt"), "42")
 	if err != nil {
 		t.Fatalf("Execute() failed: %v", err)

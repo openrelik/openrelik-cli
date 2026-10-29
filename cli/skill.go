@@ -81,8 +81,8 @@ question.`,
 				return fmt.Errorf("unknown harness: %s", harness)
 			}
 
-			// Load workers from cache or API
-			workers, err := loadWorkers(ctx)
+			// Ask the server, so the skill lists the workers registered now.
+			workers, err := fetchWorkers(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to load workers: %w", err)
 			}

@@ -19,6 +19,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -49,6 +51,8 @@ func TestGetTemplateContext(t *testing.T) {
 			DisplayName: "Empty",
 			Description: "Should be skipped.",
 		},
+		{TaskName: "x.tasks.spaced", DisplayName: "Spaced\n  name", Description: " \n "},
+		{TaskName: "x.tasks.unnamed"},
 		{
 			// 'run strings' runs the first worker named strings.
 			TaskName:    "other-worker.tasks.strings",
@@ -59,13 +63,15 @@ func TestGetTemplateContext(t *testing.T) {
 	ctx := getTemplateContext(workers)
 
 	want := []SkillWorker{
+		{CommandName: "spaced", Description: "Spaced name"},
 		{CommandName: "strings", Description: "Extract strings from files."},
 		{CommandName: "test_worker", Description: "Test Worker"},
+		{CommandName: "unnamed", Description: ""},
 	}
 	if !reflect.DeepEqual(ctx.Workers, want) {
 		t.Errorf("Workers = %+v, want %+v", ctx.Workers, want)
 	}
-	if !strings.HasSuffix(ctx.Description, " Workers: strings, test_worker.") {
+	if !strings.HasSuffix(ctx.Description, " Workers: spaced, strings, test_worker, unnamed.") {
 		t.Errorf("Description doesn't name the workers: %q", ctx.Description)
 	}
 }
@@ -224,7 +230,19 @@ func TestGenerateSkillFile(t *testing.T) {
 func TestSkillInstallConfirmation(t *testing.T) {
 	config.SetBaseDir(t.TempDir())
 	defer config.SetBaseDir("")
-	if err := config.SaveWorkersCache("", []openrelik.Worker{{TaskName: "openrelik-worker-strings.tasks.strings", DisplayName: "Strings"}}); err != nil {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/taskqueue/tasks/registered" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `[{"task_name": "openrelik-worker-strings.tasks.strings", "display_name": "Strings"}]`)
+	}))
+	defer server.Close()
+	t.Setenv("OPENRELIK_API_KEY", "test-key")
+	t.Setenv("OPENRELIK_SERVER_URL", server.URL)
+	// A fresh cache with a worker the server no longer has: the skill lists
+	// the workers on the server now.
+	if err := config.SaveWorkersCache(server.URL, []openrelik.Worker{{TaskName: "old.tasks.removed"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -262,10 +280,23 @@ func TestSkillInstallConfirmation(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("Execute() failed: %v", err)
 			}
-			_, statErr := os.Stat(filepath.Join(dir, "openrelik", "SKILL.md"))
+			skill, statErr := os.ReadFile(filepath.Join(dir, "openrelik", "SKILL.md"))
 			if installed := statErr == nil; installed != tt.wantInstall {
 				t.Errorf("installed = %v, want %v", installed, tt.wantInstall)
 			}
+			if tt.wantInstall && (!strings.Contains(string(skill), "**strings**") || strings.Contains(string(skill), "removed")) {
+				t.Errorf("SKILL.md doesn't list the server's workers:\n%s", skill)
+			}
 		})
+	}
+}
+
+func TestRenderSkillWorkerWithoutDescription(t *testing.T) {
+	got, err := renderSkill(&TemplateContext{BinaryPath: "openrelik", Workers: []SkillWorker{{CommandName: "unnamed"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "\n- **unnamed**\n") {
+		t.Errorf("want the worker on a line of its own, without ':', got:\n%s", got)
 	}
 }

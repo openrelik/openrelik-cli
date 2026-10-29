@@ -16,6 +16,7 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"embed"
 	"fmt"
 	"os"
@@ -33,9 +34,6 @@ import (
 
 //go:embed templates/skill.tmpl
 var templateFS embed.FS
-
-// skillNow returns the time the skill is generated; tests replace it.
-var skillNow = time.Now
 
 // maxSkillDescription is the longest description AgentSkills allows.
 const maxSkillDescription = 1024
@@ -91,10 +89,8 @@ func getTemplateContext(workers []openrelik.Worker) *TemplateContext {
 			continue
 		}
 		seen[name] = true
-		description := strings.Join(strings.Fields(w.Description), " ")
-		if description == "" {
-			description = w.DisplayName
-		}
+		// One line each, so a description can't start its own section.
+		description := strings.Join(strings.Fields(cmp.Or(strings.TrimSpace(w.Description), w.DisplayName)), " ")
 		skillWorkers = append(skillWorkers, SkillWorker{
 			CommandName: name,
 			Description: description,
@@ -106,7 +102,7 @@ func getTemplateContext(workers []openrelik.Worker) *TemplateContext {
 	return &TemplateContext{
 		BinaryPath:  getBinaryPath(),
 		Description: skillDescription(skillWorkers),
-		Generated:   skillNow().UTC().Format("2006-01-02"),
+		Generated:   time.Now().UTC().Format("2006-01-02"),
 		Workers:     skillWorkers,
 	}
 }

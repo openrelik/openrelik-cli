@@ -31,7 +31,8 @@ tool drives all of it.
 6. Run the workflow:
    `openrelik run WORKER [WORKER FLAGS] --case REF INPUT... -o OUTPUT_DIR --format json`
 7. Report the workflow ID, its status, the input file IDs, and each downloaded
-   file with its path and SHA256, saying whether the SHA256 was verified.
+   file with its path and SHA256, saying whether the SHA256 was verified. The
+   JSON has them in `id`, `status`, `files` and `downloaded`.
 
 Inputs are file IDs, paths of files on the server (`"Case A/disk.E01"`), or
 local files, which are uploaded first.

@@ -367,9 +367,10 @@ monitor progress after starting.`,
 
 func newWorkflowListCmd() *cobra.Command {
 	var recursive bool
+	var caseRef string
 
 	cmd := &cobra.Command{
-		Use:     "list <FOLDER>",
+		Use:     "list [FOLDER]",
 		Aliases: []string{"ls"},
 		Short:   "List workflows in a folder",
 		Long: `List the workflows in a folder, with the status of their tasks.
@@ -380,25 +381,46 @@ inside the folder that holds its input files, so the workflows of FOLDER and
 of the folders directly inside it are listed. Use --recursive to include
 all folders below FOLDER.
 
+With --case REF, lists the workflows of the case folder of case REF (see
+'case create'), or with FOLDER, of a folder inside it: a path from
+the case folder, or the ID of a folder in the case. Add --recursive for
+every workflow of the case.
+
 Workflows are sorted by creation time, most recent last. FOLDER is the
 workflow's own folder, which holds its output files.`,
 		Example: `  # List the workflows run on files in folder 42
   openrelik workflow list 42
 
-  # Include workflows anywhere below a case folder
+  # Include workflows anywhere below a folder
   openrelik workflow list "Case A/" --recursive
+
+  # List every workflow of case-123
+  openrelik workflow list --case case-123 --recursive
 
   # Print the IDs of the workflows
   openrelik workflow list 42 --format json | jq '.[].id'`,
 		Args: util.UseArgsWithQuoteHint(),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			withCase := cmd.Flags().Changed("case")
+			if len(args) == 0 && !withCase {
+				return usageErrorf("give a FOLDER, or --case REF for a case folder")
+			}
 			client, err := newClient()
 			if err != nil {
 				return err
 			}
-			folderID, err := resolveFolder(cmd.Context(), client, args[0])
-			if err != nil {
-				return err
+			var folderID int
+			var caseFolder *openrelik.Folder
+			if withCase {
+				if caseFolder, err = lookupCase(cmd, client, caseRef); err != nil {
+					return err
+				}
+				folderID = caseFolder.ID
+			}
+			if len(args) > 0 {
+				if folderID, err = resolveFolderIn(cmd.Context(), client, caseFolder, args[0]); err != nil {
+					return err
+				}
 			}
 			ids, err := findWorkflows(cmd.Context(), client, folderID, recursive)
 			if err != nil {
@@ -432,6 +454,7 @@ workflow's own folder, which holds its output files.`,
 	}
 
 	cmd.Flags().BoolVar(&recursive, "recursive", false, "Include workflows in all folders below FOLDER")
+	cmd.Flags().StringVar(&caseRef, "case", "", "List the workflows of the case folder of case `REF`, or of FOLDER inside it")
 	return cmd
 }
 

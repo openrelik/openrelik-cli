@@ -317,7 +317,7 @@ func TestDownloadByPath(t *testing.T) {
 		{name: "path", arg: "Case A/notes.txt", wantFile: "file-1.bin", want: catText},
 		{name: "case-insensitive path", arg: "/case a/evidence/DISK.BIN", wantFile: "file-3.bin", want: catBinary},
 		{name: "duplicate file names", arg: "Case A/dup.txt", wantErr: `multiple files match "Case A/dup.txt"`},
-		{name: "unknown file", arg: "Case A/missing.txt", wantErr: `no file named "missing.txt" in Case A/`},
+		{name: "unknown file", arg: "Case A/missing.txt", wantErr: `no file named "missing.txt" in /Case A/`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

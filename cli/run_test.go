@@ -672,7 +672,7 @@ func TestRunServerPathInput(t *testing.T) {
 	}
 
 	_, err := run("run", "--download", "none", "strings", "Case A/typo.E01")
-	want := `"Case A/typo.E01" is neither a local file nor a file on the server: no file named "typo.E01" in Case A/`
+	want := `"Case A/typo.E01" is neither a local file nor a file on the server: no file named "typo.E01" in /Case A/`
 	if err == nil || err.Error() != want {
 		t.Errorf("error = %v, want %q", err, want)
 	}

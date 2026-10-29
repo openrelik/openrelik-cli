@@ -50,6 +50,15 @@ Inputs are file IDs, local files, or paths of files on the server:
 
 A local file is uploaded to the upload folder, unless the folder already
 holds a file with the same name and SHA256, which is then used instead.
+
+With --case REF, the workflow runs inside the case folder of case REF (see
+'openrelik case create'): local files are uploaded to the case
+folder, server paths start at the case folder, and file IDs must be of
+files in the case:
+
+  openrelik run plaso --case case-123 disk.E01         # uploaded to the case
+  openrelik run strings --case case-123 evidence/a.bin # file in the case
+
 An input that isn't a local file and contains a '/' is a path on the
 server, as in 'file info'. If a relative path names both a local file and
 a file on the server, run fails rather than guess: write ./PATH for the
@@ -86,6 +95,7 @@ A dry run doesn't contact the server, and uses the cached list of workers.`,
 	runCmd.PersistentFlags().Bool("task-folders", false, "Organize downloads into task folders")
 	runCmd.PersistentFlags().Int("upload-folder-id", 0, "Folder ID to upload local files to")
 	runCmd.PersistentFlags().String("upload-folder-name", "", "Folder name to upload local files to (default: CLI Uploads (username))")
+	runCmd.PersistentFlags().String("case", "", "Work in the case folder of case `REF`: upload local files to it, and take inputs from it")
 	runCmd.PersistentFlags().String("then", "", "Chain workers (use as delimiter)")
 	runCmd.PersistentFlags().String("and", "", "Run workers in parallel (use as delimiter)")
 
@@ -146,9 +156,9 @@ const helpRefreshTimeout = 5 * time.Second
 
 // serverPathResolver resolves the inputs of 'run' that are paths of files
 // on the server.
-func serverPathResolver(client *openrelik.Client) util.ServerPathResolver {
+func serverPathResolver(client *openrelik.Client, caseFolder *openrelik.Folder) util.ServerPathResolver {
 	return func(ctx context.Context, path string) (int, error) {
-		id, err := resolveFile(ctx, client, path)
+		id, err := resolveFileIn(ctx, client, caseFolder, path)
 		var notFound notFoundError
 		if errors.As(err, &notFound) {
 			return 0, &util.NotOnServerError{Err: err}
@@ -337,6 +347,14 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 			if err := util.CheckInputs(positionalArgs); err != nil {
 				return err
 			}
+			if meta.CaseSet {
+				if err := checkCaseRef(meta.Case); err != nil {
+					return err
+				}
+			}
+			if meta.CaseSet && (meta.UploadFolderID != 0 || meta.UploadFolderName != "") {
+				return usageErrorf("--case uploads local files to the case folder, so it can't be used with --upload-folder-id or --upload-folder-name")
+			}
 
 			if dryRun {
 				if showProgress {
@@ -378,7 +396,19 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 				}
 			}
 
-			fileIDs, totalUploaded, err := util.ResolveInputs(cmd.Context(), client, serverPathResolver(client), positionalArgs, showProgress, meta.UploadFolderID, meta.UploadFolderName)
+			var caseFolder *openrelik.Folder
+			var checkID func(context.Context, int) error
+			if meta.CaseSet {
+				if caseFolder, err = lookupCase(cmd, client, meta.Case); err != nil {
+					return err
+				}
+				meta.UploadFolderID = caseFolder.ID
+				checkID = func(ctx context.Context, id int) error {
+					return checkFileInCase(ctx, client, caseFolder, id)
+				}
+			}
+
+			fileIDs, totalUploaded, err := util.ResolveInputs(cmd.Context(), client, serverPathResolver(client, caseFolder), checkID, positionalArgs, showProgress, meta.UploadFolderID, meta.UploadFolderName)
 			if err != nil {
 				return err
 			}

@@ -14,6 +14,20 @@ The OpenRelik CLI allows for running single workers or chaining multiple workers
 The absolute path to the `openrelik` executable for this environment is:
 `{{.BinaryPath}}`
 
+## Case Folders
+
+Each case has one case folder: a root folder found by its case reference,
+such as `case-123`, rather than by its name. Ask the user for the case
+reference, and keep all data for the case in its case folder:
+
+*   Add `--case <REF>` to `run`, `upload`, `folder list`, `folder tree`,
+    `folder create` and `workflow list`.
+    Local files are then uploaded to the case folder, and folders and server
+    paths are taken from inside it.
+*   `{{.BinaryPath}} case create <REF> [NAME]` creates the case folder,
+    or prints it if it already exists. `{{.BinaryPath}} case list` lists the cases.
+*   Don't create root folders by name for case data.
+
 ## Available Tools (Workers)
 
 {{range .Workers}}

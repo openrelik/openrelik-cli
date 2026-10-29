@@ -129,10 +129,11 @@ func (e *NotOnServerError) Unwrap() error { return e.Err }
 
 // ResolveInputs returns the file IDs of the inputs to 'run', in the order
 // given. Inputs are file IDs, paths of files on the server, resolved with
-// resolve, or local files. Local files are uploaded to an OpenRelik folder,
+// resolve, or local files. File IDs are checked with checkID, if it isn't
+// nil, before anything is uploaded. Local files are uploaded to an OpenRelik folder,
 // unless the folder already holds a file with the same name and SHA256.
 // It also returns the number of bytes uploaded.
-func ResolveInputs(ctx context.Context, client *openrelik.Client, resolve ServerPathResolver, args []string, showProgress bool, folderID int, folderName string) ([]int, int64, error) {
+func ResolveInputs(ctx context.Context, client *openrelik.Client, resolve ServerPathResolver, checkID func(context.Context, int) error, args []string, showProgress bool, folderID int, folderName string) ([]int, int64, error) {
 	fileIDs := make([]int, len(args))
 	var toUpload []int // indexes into args
 	var totalUploaded int64
@@ -144,6 +145,11 @@ func ResolveInputs(ctx context.Context, client *openrelik.Client, resolve Server
 		}
 		switch in.kind {
 		case inputID:
+			if checkID != nil {
+				if err := checkID(ctx, in.id); err != nil {
+					return nil, 0, err
+				}
+			}
 			fileIDs[i] = in.id
 		case inputServer:
 			id, err := resolve(ctx, in.path)

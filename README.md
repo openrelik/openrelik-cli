@@ -310,6 +310,7 @@ Run workers on files. The CLI generates a subcommand for each worker from the lo
 *   Use `--and` to run workers in parallel.
 *   Use `--dry-run` to output the generated JSON workflow specification without executing it.
 *   Use `--case REF` to run inside the case folder of case `REF`: local files are uploaded to the case folder, server paths start at the case folder, and file IDs must be of files in the case.
+*   With `--format json`, `run` prints the workflow with `status`, how it ended, and `downloaded`: each downloaded file with its `file_id`, `path`, `size`, `sha256` and `verified`, which says whether the SHA256 matched the server's. It used to print the workflow alone.
 *   Use `--download final|all|none` to choose which results are downloaded (default `final`), and `--download-result` or `--no-download-result` after a worker to override that for the worker's task. `--no-download` was removed; use `--download none`.
 
 #### Examples
@@ -338,7 +339,7 @@ openrelik run strings --then grep --regex "password" 100 --dry-run
 
 Install specification files for AI assistants.
 
-*   `skill install [dir]`: Query registered workers dynamically from the active OpenRelik server and generate a customized `SKILL.md` file. This tailors the skill capabilities directly to your server's available workers so AI agents can discover and run them.
+*   `skill install [dir]`: Generate a `SKILL.md` that teaches AI agents to use the CLI: checking the login, finding files, running and chaining workers, reading results and exit statuses, and handling evidence. It lists the workers registered on the active server, with their descriptions; agents read a worker's flags with `run <worker> --help`. Run it again when workers are added or removed. If `openrelik` is on your PATH, the skill uses the plain command name and lets harnesses that read `allowed-tools`, such as Claude Code, run read-only commands (`folder list`, `file info`, `workflow status` and the like) without asking; uploads, runs, sharing and downloads still ask. Otherwise it gives the full path of the binary.
 *   Use `--harness` to target frameworks (`generic`, `codex`, `gemini`, `claude`, `opencode`, `pi`, `copilot`).
 *   Use `--local` to install the skill in the current project directory.
 

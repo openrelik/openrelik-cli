@@ -15,6 +15,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -467,8 +468,12 @@ func createWorkerCmd(worker openrelik.Worker, allWorkers []openrelik.Worker) *co
 				}
 			}
 
-			if outputFormat != "human" && fullWorkflow != nil {
-				if err := formatAndPrint(cmd, &WorkflowInfoView{Workflow: fullWorkflow}); err != nil {
+			if outputFormat != "human" {
+				var view any = &RunResultView{Workflow: cmp.Or(fullWorkflow, workflow), Status: lastStatus.Status, Saved: saved}
+				if outputFormat == "verbose" && fullWorkflow != nil {
+					view = &WorkflowInfoView{Workflow: fullWorkflow}
+				}
+				if err := formatAndPrint(cmd, view); err != nil {
 					return err
 				}
 				return workflowErr

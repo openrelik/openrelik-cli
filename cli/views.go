@@ -1124,6 +1124,21 @@ func (v *RunResultView) RenderHuman(w io.Writer) error {
 	return nil
 }
 
+// UnwrapJSON returns the workflow with how it ended ("status") and the files
+// downloaded ("downloaded"), each with its path, SHA256 and whether the
+// SHA256 was verified.
+func (v *RunResultView) UnwrapJSON() any {
+	saved := v.Saved
+	if saved == nil {
+		saved = []*util.SavedFile{}
+	}
+	return struct {
+		*openrelik.Workflow
+		Status     string            `json:"status"`
+		Downloaded []*util.SavedFile `json:"downloaded"`
+	}{v.Workflow, v.Status, saved}
+}
+
 // WorkflowCreatedView renders a one-line confirmation after workflow creation.
 type WorkflowCreatedView struct{ *openrelik.Workflow }
 

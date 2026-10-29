@@ -16,9 +16,14 @@ package cli
 
 import (
 	"bytes"
+	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -26,60 +31,170 @@ import (
 	"github.com/openrelik/openrelik-go-client"
 )
 
+var updateGolden = flag.Bool("update", false, "update the golden files in testdata")
+
 func TestGetTemplateContext(t *testing.T) {
 	workers := []openrelik.Worker{
 		{
-			TaskName:    "openrelik-worker-strings.tasks.strings",
-			DisplayName: "Strings",
-			Description: "Extract strings from files.",
-			TaskConfig: []openrelik.TaskConfig{
-				{
-					Name:        "min_len",
-					Type:        "integer",
-					Description: "Minimum string length",
-					Required:    false,
-				},
-			},
-		},
-		{
 			TaskName:    "test_worker",
 			DisplayName: "Test Worker",
-			Description: "A test worker with no config.",
+		},
+		{
+			TaskName:    "openrelik-worker-strings.tasks.strings",
+			DisplayName: "Strings",
+			Description: "Extract strings\n  from files.",
 		},
 		{
 			TaskName:    "",
 			DisplayName: "Empty",
 			Description: "Should be skipped.",
 		},
+		{
+			// 'run strings' runs the first worker named strings.
+			TaskName:    "other-worker.tasks.strings",
+			Description: "Another worker named strings.",
+		},
 	}
 
 	ctx := getTemplateContext(workers)
 
-	if len(ctx.Workers) != 2 {
-		t.Fatalf("expected 2 workers, got %d", len(ctx.Workers))
+	want := []SkillWorker{
+		{CommandName: "strings", Description: "Extract strings from files."},
+		{CommandName: "test_worker", Description: "Test Worker"},
+	}
+	if !reflect.DeepEqual(ctx.Workers, want) {
+		t.Errorf("Workers = %+v, want %+v", ctx.Workers, want)
+	}
+	if !strings.HasSuffix(ctx.Description, " Workers: strings, test_worker.") {
+		t.Errorf("Description doesn't name the workers: %q", ctx.Description)
+	}
+}
+
+func TestSkillDescription(t *testing.T) {
+	if got := skillDescription(nil); got != skillDescriptionBase {
+		t.Errorf("no workers: got %q", got)
 	}
 
-	w1 := ctx.Workers[0]
-	if w1.CommandName != "strings" {
-		t.Errorf("expected CommandName 'strings', got '%s'", w1.CommandName)
+	var many []SkillWorker
+	for i := range 200 {
+		many = append(many, SkillWorker{CommandName: fmt.Sprintf("worker_%03d", i)})
 	}
-	if w1.DisplayName != "Strings" {
-		t.Errorf("expected DisplayName 'Strings', got '%s'", w1.DisplayName)
+	got := skillDescription(many)
+	if len(got) > maxSkillDescription {
+		t.Errorf("description is %d bytes, more than %d", len(got), maxSkillDescription)
 	}
-	if len(w1.Config) != 1 {
-		t.Fatalf("expected 1 config param, got %d", len(w1.Config))
+	m := regexp.MustCompile(`worker_(\d+), and (\d+) more\.$`).FindStringSubmatch(got)
+	if m == nil {
+		t.Fatalf("expected the description to end with the number left out, got %q", got)
 	}
-	if w1.Config[0].Name != "min_len" {
-		t.Errorf("expected config Name 'min_len', got '%s'", w1.Config[0].Name)
+	// Every worker is either named or counted.
+	last, _ := strconv.Atoi(m[1])
+	more, _ := strconv.Atoi(m[2])
+	if last+1+more != len(many) {
+		t.Errorf("named %d and counted %d more, want %d in all", last+1, more, len(many))
 	}
 
-	w2 := ctx.Workers[1]
-	if w2.CommandName != "test_worker" {
-		t.Errorf("expected CommandName 'test_worker', got '%s'", w2.CommandName)
+	// A name too long to fit is counted, not dropped.
+	long := []SkillWorker{{CommandName: strings.Repeat("x", maxSkillDescription)}, {CommandName: "strings"}}
+	if got, want := skillDescription(long), skillDescriptionBase+" Workers: 2, listed in the skill."; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
-	if len(w2.Config) != 0 {
-		t.Errorf("expected 0 config params, got %d", len(w2.Config))
+}
+
+func TestReadOnlyCommands(t *testing.T) {
+	root := NewRootCmd()
+	for _, c := range readOnlyCommands {
+		found, _, err := root.Find(strings.Fields(c))
+		if err != nil || found.CommandPath() != "openrelik "+c {
+			t.Errorf("%q is not a command", c)
+		}
 	}
+}
+
+// frontmatter returns the keys and values of the YAML frontmatter of a
+// rendered SKILL.md.
+func frontmatter(t *testing.T, content string) map[string]string {
+	t.Helper()
+	parts := strings.SplitN(content, "---\n", 3)
+	if len(parts) != 3 || parts[0] != "" {
+		t.Fatalf("no frontmatter in:\n%s", content)
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(parts[1]), "\n") {
+		key, value, ok := strings.Cut(line, ": ")
+		if !ok {
+			t.Fatalf("bad frontmatter line %q", line)
+		}
+		fields[key] = value
+	}
+	return fields
+}
+
+func TestRenderSkill(t *testing.T) {
+	workers := []SkillWorker{
+		{CommandName: "grep", Description: "Search files for a pattern"},
+		{CommandName: "strings", Description: "Extract strings from files"},
+	}
+	data := &TemplateContext{
+		BinaryPath:  "openrelik",
+		Description: skillDescription(workers),
+		Generated:   "2026-10-28",
+		Workers:     workers,
+	}
+
+	t.Run("on PATH", func(t *testing.T) {
+		got, err := renderSkill(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		golden := filepath.Join("testdata", "skill_golden.md")
+		if *updateGolden {
+			if err := os.WriteFile(golden, got, 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		want, err := os.ReadFile(golden)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("SKILL.md differs from %s; run 'go test ./cli -run TestRenderSkill -update' and review the diff.\nGot:\n%s", golden, got)
+		}
+
+		fields := frontmatter(t, string(got))
+		for key := range fields {
+			if key != "name" && key != "description" && key != "allowed-tools" {
+				t.Errorf("unexpected frontmatter key %q", key)
+			}
+		}
+		if fields["name"] != "openrelik" {
+			t.Errorf("name = %q, want openrelik", fields["name"])
+		}
+		desc, err := strconv.Unquote(fields["description"])
+		if err != nil || desc != data.Description {
+			t.Errorf("description = %s, want %q quoted", fields["description"], data.Description)
+		}
+		tools := fields["allowed-tools"]
+		if !strings.Contains(tools, "Bash(openrelik folder list:*)") || strings.Contains(tools, "Bash(openrelik:*)") ||
+			strings.Contains(tools, "openrelik run") || strings.Contains(tools, "openrelik upload") {
+			t.Errorf("allowed-tools = %q, want only read-only commands", tools)
+		}
+	})
+
+	t.Run("not on PATH", func(t *testing.T) {
+		abs := *data
+		abs.BinaryPath = "/opt/openrelik/bin/openrelik"
+		got, err := renderSkill(&abs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := frontmatter(t, string(got))["allowed-tools"]; ok {
+			t.Error("allowed-tools set for a binary that isn't on PATH")
+		}
+		if !strings.Contains(string(got), "Run the CLI as `/opt/openrelik/bin/openrelik`") {
+			t.Errorf("expected the binary path in:\n%s", got)
+		}
+	})
 }
 
 func TestGenerateSkillFile(t *testing.T) {
@@ -93,29 +208,16 @@ func TestGenerateSkillFile(t *testing.T) {
 		},
 	}
 
-	err := GenerateSkillFile(tempDir, workers)
-	if err != nil {
+	if err := GenerateSkillFile(tempDir, workers); err != nil {
 		t.Fatalf("GenerateSkillFile failed: %v", err)
 	}
 
-	skillFile := filepath.Join(tempDir, "SKILL.md")
-	if _, err := os.Stat(skillFile); os.IsNotExist(err) {
-		t.Fatalf("expected file %s to exist", skillFile)
-	}
-
-	contentBytes, err := os.ReadFile(skillFile)
+	content, err := os.ReadFile(filepath.Join(tempDir, "SKILL.md"))
 	if err != nil {
 		t.Fatalf("failed to read generated SKILL.md: %v", err)
 	}
-
-	content := string(contentBytes)
-
-	// Check for dynamic content
-	if !strings.Contains(content, "### Strings") {
-		t.Errorf("expected content to contain '### Strings'")
-	}
-	if !strings.Contains(content, "run strings") {
-		t.Errorf("expected content to contain 'run strings'")
+	if !strings.Contains(string(content), "- **strings**: Extract strings from files.") {
+		t.Errorf("expected the strings worker in:\n%s", content)
 	}
 }
 

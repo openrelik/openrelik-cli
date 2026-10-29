@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -59,8 +60,10 @@ func newSkillInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install [dir]",
 		Short: "Generate an AgentSkills SKILL.md file",
-		Long: `Dynamically generates an AgentSkills specification file (SKILL.md) based
-on the workers currently registered with the OpenRelik server.
+		Long: `Generates an AgentSkills skill (SKILL.md) that teaches AI agents to use
+this CLI: checking the login, finding files, running workers, and handling
+results and errors. The skill lists the workers registered on the server
+when it was generated; run this command again to update the list.
 
 If a directory is provided, the skill will be installed in <dir>/openrelik.
 If no directory is provided, it defaults to the global or local directory
@@ -135,6 +138,14 @@ question.`,
 
 			if err := GenerateSkillFile(destDir, workers); err != nil {
 				return err
+			}
+			if exe, err := os.Executable(); err == nil && isTemporaryBuild(exe) && !quiet {
+				if onPath, err := exec.LookPath("openrelik"); err == nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: this is a temporary build from 'go run', so the skill runs 'openrelik' from your PATH (%s), which may be another version.\n", onPath)
+				} else {
+					fmt.Fprintln(cmd.ErrOrStderr(), "Warning: this is a temporary build from 'go run', and there is no 'openrelik' on your PATH, so the skill's commands won't run.")
+				}
+				fmt.Fprintln(cmd.ErrOrStderr(), "To use this version, build it with 'go build -o openrelik', put it on your PATH and install the skill with it.")
 			}
 
 			versionFile := filepath.Join(destDir, ".version")

@@ -338,7 +338,7 @@ openrelik run strings --then grep --regex "password" 100 --dry-run
 
 Install specification files for AI assistants.
 
-*   `skill install [dir]`: Query registered workers dynamically from the active OpenRelik server and generate a customized `SKILL.md` file. This tailors the skill capabilities directly to your server's available workers so AI agents can discover and run them.
+*   `skill install [dir]`: Generate a `SKILL.md` that teaches AI agents to use the CLI: checking the login, finding files, running and chaining workers, reading results and exit statuses, and handling evidence. It lists the workers registered on the active server, with their descriptions; agents read a worker's flags with `run <worker> --help`. Run it again when workers are added or removed. If `openrelik` is on your PATH, the skill uses the plain command name and lets harnesses that read `allowed-tools`, such as Claude Code, run read-only commands (`folder list`, `file info`, `workflow status` and the like) without asking; uploads, runs, sharing and downloads still ask. Otherwise it gives the full path of the binary.
 *   Use `--harness` to target frameworks (`generic`, `codex`, `gemini`, `claude`, `opencode`, `pi`, `copilot`).
 *   Use `--local` to install the skill in the current project directory.
 

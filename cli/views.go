@@ -391,6 +391,16 @@ type folderContents struct {
 	Files   []openrelik.FolderFile `json:"files"`
 }
 
+// fileLabel is a file's display name, followed by the path it was found at,
+// such as inside a disk image, when the server knows one. Extracted files
+// often share a name (several .bash_history files); the path tells them apart.
+func fileLabel(name string, originalPath *string) string {
+	if originalPath == nil || *originalPath == "" || *originalPath == name {
+		return name
+	}
+	return name + "  (" + *originalPath + ")"
+}
+
 func (v *FolderContentsView) RenderHuman(w io.Writer) error {
 	return (&folderRowWriter{w: w, showCase: v.ShowCase}).write(v.Entries)
 }
@@ -439,7 +449,7 @@ func (rw *folderRowWriter) write(entries []listEntry) error {
 			if rw.showCase {
 				row = append(row, "-")
 			}
-			row = append(row, f.DisplayName)
+			row = append(row, fileLabel(f.DisplayName, f.OriginalPath))
 		}
 		rows = append(rows, row)
 	}
@@ -727,7 +737,7 @@ func (v *FolderTreeView) RenderHuman(w io.Writer) error {
 			if v.ShowSize {
 				details += "  " + util.FormatBytes(e.file.Filesize)
 			}
-			fmt.Fprintf(w, "%s%s[%s]  %s\n", prefix, connector, details, e.file.DisplayName)
+			fmt.Fprintf(w, "%s%s[%s]  %s\n", prefix, connector, details, fileLabel(e.file.DisplayName, e.file.OriginalPath))
 		}
 	}
 	walk(v.Root, "")
@@ -914,7 +924,7 @@ func renderTasks(w io.Writer, tasks []openrelik.Task, verbose bool) error {
 			if i > 0 {
 				row = blank
 			}
-			fmt.Fprintln(tw, strings.Join(append(row, strconv.Itoa(f.ID), f.DisplayName), "\t"))
+			fmt.Fprintln(tw, strings.Join(append(row, strconv.Itoa(f.ID), fileLabel(f.DisplayName, f.OriginalPath)), "\t"))
 		}
 	}
 	return tw.Flush()
@@ -966,9 +976,9 @@ func (v *WorkflowInfoView) render(w io.Writer, verbose bool) error {
 		}
 		for _, f := range v.Files {
 			if verbose {
-				fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, f.DisplayName, f.DataType)
+				fmt.Fprintf(tw, "%d\t%s\t%s\n", f.ID, fileLabel(f.DisplayName, f.OriginalPath), f.DataType)
 			} else {
-				fmt.Fprintf(tw, "%d\t%s\n", f.ID, f.DisplayName)
+				fmt.Fprintf(tw, "%d\t%s\n", f.ID, fileLabel(f.DisplayName, f.OriginalPath))
 			}
 		}
 		if err := tw.Flush(); err != nil {

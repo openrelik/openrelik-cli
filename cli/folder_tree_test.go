@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	openrelik "github.com/openrelik/openrelik-go-client"
 )
 
 // treeServerFolder is a folder in the mock tree served by newTreeServer.
@@ -328,5 +330,28 @@ func TestFolderTreeErrors(t *testing.T) {
 				t.Errorf("expected no output on error, got %q", out)
 			}
 		})
+	}
+}
+
+func TestFolderTreeShowsOriginalPath(t *testing.T) {
+	path, same := "root/.bash_history", ".bash_history"
+	root := &treeNode{folder: &openrelik.Folder{ID: 1, DisplayName: "case"}, entries: []listEntry{
+		{file: &openrelik.FolderFile{ID: 42, DisplayName: ".bash_history", OriginalPath: &path}},
+		{file: &openrelik.FolderFile{ID: 43, DisplayName: ".bash_history", OriginalPath: &same}},
+		{file: &openrelik.FolderFile{ID: 44, DisplayName: "notes.txt"}},
+	}}
+	var b bytes.Buffer
+	if err := (&FolderTreeView{Root: root}).RenderHuman(&b); err != nil {
+		t.Fatal(err)
+	}
+	want := `[1]  case/
+├── [42]  .bash_history  (root/.bash_history)
+├── [43]  .bash_history
+└── [44]  notes.txt
+
+0 folders, 3 files
+`
+	if b.String() != want {
+		t.Errorf("got:\n%s\nwant:\n%s", b.String(), want)
 	}
 }

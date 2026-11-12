@@ -1429,3 +1429,22 @@ func TestFolderSearchRootNoMatches(t *testing.T) {
 		t.Errorf("--root must not use the server search, got queries %q", server.queries)
 	}
 }
+
+func TestFolderListShowsOriginalPath(t *testing.T) {
+	path := "home/ubuntu/.bash_history"
+	entries := []listEntry{
+		{file: &openrelik.FolderFile{ID: 42, DisplayName: ".bash_history", Filesize: 10, DataType: "text", OriginalPath: &path}},
+		{file: &openrelik.FolderFile{ID: 43, DisplayName: "notes.txt", Filesize: 10, DataType: "text"}},
+	}
+	var b bytes.Buffer
+	if err := (&FolderContentsView{Entries: entries}).RenderHuman(&b); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(b.String(), "\n")
+	if !strings.HasSuffix(lines[1], "  .bash_history  (home/ubuntu/.bash_history)") {
+		t.Errorf("file with a path: got %q", lines[1])
+	}
+	if !strings.HasSuffix(lines[2], "  notes.txt") {
+		t.Errorf("file without a path: got %q", lines[2])
+	}
+}
